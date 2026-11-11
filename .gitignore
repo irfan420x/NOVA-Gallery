@@ -1,21 +1,11 @@
 # Build outputs
 build/
 *.apk
-*.aab
-
-# Vendored dependencies (fetched with tools/resolve_deps.py, see README)
+# Fetched dependencies (73 MB of AARs/JARs — re-fetch with tools/resolve_deps.py)
 deps/
-
 # Signing
 *.keystore
-*.jks
-debug.keystore
-
-# Local machine config
+# Local config
 local.properties
-
-# IDE
 .idea/
 *.iml
-.gradle/
-gradle/

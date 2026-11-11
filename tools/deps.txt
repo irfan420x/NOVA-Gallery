@@ -1,4 +1,4 @@
-# Root Maven artifacts for NOVA Files. Fetched with:
+# Root Maven artifacts for NOVA apps. Fetched with:
 #   python3 tools/resolve_deps.py deps/ $(cat tools/deps.txt)
 # Transitive dependencies resolve automatically from the artifacts' POMs.
 androidx.compose.ui:ui:1.7.2

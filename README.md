@@ -1,21 +1,19 @@
 # NOVA Gallery
 
-The photo and video gallery for **NOVA OS** — a modern gallery app for Android 10+.
+The photo and video gallery for **NOVA OS** — fast, clean, Android 10+.
 
-- **Albums** — photos and videos grouped by folder, with cover thumbnails,
-  item counts and total sizes
-- **Photos** — all media in one grid, newest first, with adjustable grid size
-- **Viewer** — pinch-zoom for photos, video playback with controls, prev/next
-  navigation, share, favorite, delete (with the system confirmation on
-  Android 10+), and a details sheet (name, type, date, size, resolution,
-  duration, album, location)
-- **Favorites** — star any photo or video to pin it in its own tab
-- **Search** — find photos by file name
-- **Multi-select** — long-press to select several items, then share or delete
-  them together (one system confirmation for the whole batch on Android 11+)
+- **Albums** — MediaStore buckets with covers, counts and total sizes
+- **Photos grid** — newest first, adjustable columns (2/3/4, persisted)
+- **Viewer** — swipe left/right to change photos, pinch-zoom (swiping locks
+  while zoomed in), video playback with controls, prev/next buttons,
+  share, favorite, delete (with system confirmation), details sheet
+- **Favorites tab** — starred photos and videos, persisted
+- **Search** by file name
+- **Multi-select** — long-press to select, then share or delete in a batch
+  (system confirmation on Android 10+)
 - **Dark / light theme**, persisted
-- **In-app Error log** — every crash and failed operation is recorded with its
-  time, so problems can be reported with the exact error
+- **In-app Error log** — every crash and failed operation is recorded with
+  its time, so problems can be reported with the exact error
 
 ## Build
 
@@ -52,8 +50,17 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
-- **v1.0** — Albums, Photos grid, viewer with pinch-zoom and video playback,
-  favorites, search, multi-select share/delete, themes, Error log.
+- **v1.2** — Swipe to change photos in the viewer (HorizontalPager; zoom
+  locks paging while zoomed in) and the system back button now steps back
+  through the layers — viewer → grid, album → albums, search → clear,
+  selection → clear, error log → close — instead of exiting the app.
+- **v1.1** — Two fixes: the MediaStore query rejected `LIMIT` in the sort
+  order, so the gallery opened empty; and tapping "Allow access" crashed —
+  the Activity Result API always generates a permission request code of
+  65536 or higher, and `FragmentActivity` rejects any code above the lower
+  16 bits. `MainActivity` now extends `ComponentActivity`.
+- **v1.0** — Albums, Photos grid, viewer with pinch-zoom and video
+  playback, Favorites, search, multi-select share/delete, themes, Error log.
 
 ## License
 

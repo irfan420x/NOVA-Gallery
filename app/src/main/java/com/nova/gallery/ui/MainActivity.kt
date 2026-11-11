@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -200,13 +201,13 @@ fun NovaGalleryApp() {
     NovaTheme(darkTheme = darkTheme) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when {
-                showErrorLog -> ErrorLogScreen(onBack = { showErrorLog = false })
+                showErrorLog -> {
+                    BackHandler { showErrorLog = false }
+                    ErrorLogScreen(onBack = { showErrorLog = false })
+                }
                 viewerItem != null -> ViewerScreen(
-                    item = viewerItem,
-                    hasPrev = (viewerIndex ?: 0) > 0,
-                    hasNext = (viewerIndex ?: 0) < viewerList.size - 1,
-                    onPrev = { viewerIndex = (viewerIndex ?: 0) - 1 },
-                    onNext = { viewerIndex = (viewerIndex ?: 0) + 1 },
+                    items = viewerList,
+                    initialIndex = viewerIndex ?: 0,
                     onBack = { viewerIndex = null; reload() },
                     onDeleted = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onStatus = ::onStatus
@@ -216,6 +217,15 @@ fun NovaGalleryApp() {
                     onSkip = { skipPermissions = true }
                 )
                 else -> {
+                    // System back button: step back through the layers instead of
+                    // exiting the app — selection, then search, then album.
+                    if (selected.isNotEmpty()) {
+                        BackHandler { selected = emptySet() }
+                    } else if (query.isNotBlank()) {
+                        BackHandler { query = ""; searchResults = emptyList() }
+                    } else if (openAlbum != null) {
+                        BackHandler { openAlbum = null }
+                    }
                     val selectionMode = selected.isNotEmpty()
                     Scaffold(
                         topBar = {

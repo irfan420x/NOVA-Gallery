@@ -1,0 +1,21 @@
+# Build outputs
+build/
+*.apk
+*.aab
+
+# Vendored dependencies (fetched with tools/resolve_deps.py, see README)
+deps/
+
+# Signing
+*.keystore
+*.jks
+debug.keystore
+
+# Local machine config
+local.properties
+
+# IDE
+.idea/
+*.iml
+.gradle/
+gradle/

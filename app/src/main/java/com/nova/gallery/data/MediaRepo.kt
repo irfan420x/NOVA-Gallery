@@ -55,7 +55,10 @@ object MediaRepo {
         val favorites = FavoriteStore.load(context)
         val out = ArrayList<MediaItem>()
         try {
-            val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC LIMIT $limit"
+            // NOTE: no LIMIT here — MediaStore's provider rejects the LIMIT
+            // token in the sort order ("Invalid token LIMIT"). The caller
+            // caps the result with .take(limit) instead.
+            val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
             context.contentResolver.query(
                 collection, PROJECTION, selection, selectionArgs, sortOrder
             )?.use { c ->

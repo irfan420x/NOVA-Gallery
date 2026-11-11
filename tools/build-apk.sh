@@ -6,23 +6,10 @@
 # Steps: aapt2 compile+link, javac R.java, kotlinc (embeddable) + Compose
 # plugin, d8, zipalign, apksigner.
 set -e
-# Portable paths: this repo's root is the script's parent directory.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# The shared NOVA Files toolchain (JDK, kotlinc, dependency jars) is reused.
-# Set NOVA_FILES_ROOT, or check out NOVA-Files next to this repo; the
-# $HOME/workspace/nova-files location is the last fallback.
-if [ -n "$NOVA_FILES_ROOT" ]; then
-    FILES_ROOT="$NOVA_FILES_ROOT"
-elif [ -d "$ROOT/../nova-files" ]; then
-    FILES_ROOT="$ROOT/../nova-files"
-elif [ -d "$ROOT/../NOVA-Files" ]; then
-    FILES_ROOT="$ROOT/../NOVA-Files"
-else
-    FILES_ROOT="$HOME/workspace/nova-files"
-fi
-export JAVA_HOME="${JAVA_HOME:-$FILES_ROOT/tools/jdk-17.0.21+9}"
-export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
+ROOT="$HOME/workspace/nova-gallery"
+FILES_ROOT="$HOME/workspace/nova-files"
+export JAVA_HOME="$FILES_ROOT/tools/jdk-17.0.21+9"
+export ANDROID_HOME="$HOME/android-sdk"
 export PATH="$JAVA_HOME/bin:$PATH"
 AAPT2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
 D8="$ANDROID_HOME/build-tools/35.0.0/d8"
@@ -58,7 +45,7 @@ echo "== 2. aapt2 link =="
 LINK_ARGS=(-I "$ANDROID_JAR" --manifest "$SRC/AndroidManifest.xml"
     --auto-add-overlay --java "$BUILD/gen"
     --min-sdk-version 29 --target-sdk-version 35
-    --version-code 1 --version-name 1.0
+    --version-code 2 --version-name 1.1
     -o "$BUILD/apk/app-unsigned.apk")
 while read -r pkg resdir; do
     LINK_ARGS+=(--extra-packages "$pkg")

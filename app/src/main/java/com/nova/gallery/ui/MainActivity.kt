@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,7 +35,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity
 import coil.compose.AsyncImage
 import com.nova.gallery.data.Album
 import com.nova.gallery.data.ErrorLog
@@ -57,7 +57,7 @@ private fun mediaPermissions(): Array<String> {
     }
 }
 
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()

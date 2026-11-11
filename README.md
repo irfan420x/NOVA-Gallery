@@ -50,6 +50,10 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.4** — Advanced: Trash (30-day recycle bin, Android 11+) — deleting
+  a photo moves it to the system Trash instead of destroying it, with
+  Restore and permanent delete from the new Trash tab; plus Memories
+  ("On this day" — photos from this day in past years) on the Albums tab.
 - **v1.3** — The swipe bug, found by a full audit: the zoomable image's
   `transformable()` modifier consumed every single-finger horizontal drag
   as a "pan", so the HorizontalPager never saw the swipe and photos never

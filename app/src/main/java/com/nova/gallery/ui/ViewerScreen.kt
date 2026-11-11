@@ -45,6 +45,8 @@ import kotlinx.coroutines.launch
 fun ViewerScreen(
     items: List<MediaItem>,
     initialIndex: Int,
+    isTrash: Boolean = false,
+    onRestore: (() -> Unit)? = null,
     onBack: () -> Unit,
     onDeleted: () -> Unit,
     onStatus: (String) -> Unit
@@ -70,26 +72,36 @@ fun ViewerScreen(
         androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            onStatus("Deleted")
+            onStatus(if (MediaRepo.hasTrash(context)) "Moved to Trash" else "Deleted")
             onDeleted()
         } else {
-            onStatus("Delete cancelled")
+            onStatus("Cancelled")
         }
     }
 
+    // v1.4: deleting moves the photo to the Trash (restorable for 30 days)
+    // instead of destroying it. Below Android 11 there is no Trash API, so
+    // the delete is permanent.
     fun doDelete(item: MediaItem) {
-        when (val result = MediaRepo.delete(context, item)) {
-            is MediaRepo.DeleteResult.Deleted -> {
-                onStatus("Deleted")
-                onDeleted()
+        val sender = MediaRepo.trashItems(context, listOf(item), true)
+        if (sender != null) {
+            deleteLauncher.launch(
+                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+            )
+        } else {
+            when (val result = MediaRepo.delete(context, item)) {
+                is MediaRepo.DeleteResult.Deleted -> {
+                    onStatus("Deleted")
+                    onDeleted()
+                }
+                is MediaRepo.DeleteResult.NeedsConfirmation -> {
+                    val s = result.exception.userAction.actionIntent.intentSender
+                    deleteLauncher.launch(
+                        androidx.activity.result.IntentSenderRequest.Builder(s).build()
+                    )
+                }
+                is MediaRepo.DeleteResult.Failed -> onStatus("Couldn't delete: ${result.error.message}")
             }
-            is MediaRepo.DeleteResult.NeedsConfirmation -> {
-                val sender = result.exception.userAction.actionIntent.intentSender
-                deleteLauncher.launch(
-                    androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-                )
-            }
-            is MediaRepo.DeleteResult.Failed -> onStatus("Couldn't delete: ${result.error.message}")
         }
     }
 
@@ -102,22 +114,26 @@ fun ViewerScreen(
                 },
                 actions = {
                     if (currentItem != null) {
-                        IconButton(onClick = {
-                            isFavorite = com.nova.gallery.data.FavoriteStore.toggle(context, currentItem)
-                            onStatus(if (isFavorite) "Added to favorites" else "Removed from favorites")
-                        }) {
-                            Icon(
-                                if (isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
-                                if (isFavorite) "Remove from favorites" else "Add to favorites"
-                            )
-                        }
-                        IconButton(onClick = {
-                            val intent = Intent.createChooser(MediaRepo.shareIntent(currentItem), "Share")
-                            context.startActivity(intent)
-                        }) { Icon(Icons.Filled.Share, "Share") }
-                        IconButton(onClick = { showDetails = true }) { Icon(Icons.Filled.Info, "Details") }
-                        IconButton(onClick = { showDeleteConfirm = true }) {
-                            Icon(Icons.Filled.Delete, "Delete", tint = NovaDanger)
+                        if (isTrash) {
+                            TextButton(onClick = { onRestore?.invoke() }) { Text("Restore") }
+                        } else {
+                            IconButton(onClick = {
+                                isFavorite = com.nova.gallery.data.FavoriteStore.toggle(context, currentItem)
+                                onStatus(if (isFavorite) "Added to favorites" else "Removed from favorites")
+                            }) {
+                                Icon(
+                                    if (isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                    if (isFavorite) "Remove from favorites" else "Add to favorites"
+                                )
+                            }
+                            IconButton(onClick = {
+                                val intent = Intent.createChooser(MediaRepo.shareIntent(currentItem), "Share")
+                                context.startActivity(intent)
+                            }) { Icon(Icons.Filled.Share, "Share") }
+                            IconButton(onClick = { showDetails = true }) { Icon(Icons.Filled.Info, "Details") }
+                            IconButton(onClick = { showDeleteConfirm = true }) {
+                                Icon(Icons.Filled.Delete, "Delete", tint = NovaDanger)
+                            }
                         }
                     }
                 }
@@ -197,13 +213,20 @@ fun ViewerScreen(
     if (showDeleteConfirm && current != null) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Delete this ${if (current.isVideo) "video" else "photo"}?") },
-            text = { Text(current.displayName) },
+            title = { Text("Move to Trash?") },
+            text = {
+                Text(
+                    if (MediaRepo.hasTrash(context))
+                        "${current.displayName}\n\nIt can be restored for 30 days."
+                    else
+                        "${current.displayName}\n\nThis will be permanently deleted."
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     showDeleteConfirm = false
                     doDelete(current)
-                }) { Text("Delete", color = NovaDanger) }
+                }) { Text("Move to Trash", color = NovaDanger) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }

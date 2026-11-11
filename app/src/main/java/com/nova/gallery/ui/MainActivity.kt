@@ -15,6 +15,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -48,7 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class GalleryTab { ALBUMS, PHOTOS, FAVORITES }
+enum class GalleryTab { ALBUMS, PHOTOS, FAVORITES, TRASH }
 
 private fun mediaPermissions(): Array<String> {
     return if (Build.VERSION.SDK_INT >= 33) {
@@ -99,10 +101,13 @@ fun NovaGalleryApp() {
     var albums by remember { mutableStateOf<List<Album>>(emptyList()) }
     var photos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var favorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var trashed by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var memories by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var openAlbum by remember { mutableStateOf<String?>(null) }
     var albumPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf<Int?>(null) }
     var viewerList by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var viewerIsTrash by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
@@ -124,9 +129,13 @@ fun NovaGalleryApp() {
             loading = true
             val all = withContext(Dispatchers.IO) { MediaRepo.loadAll(context) }
             val alb = withContext(Dispatchers.IO) { MediaRepo.loadAlbums(context) }
+            val tr = withContext(Dispatchers.IO) { MediaRepo.loadTrashed(context) }
+            val mem = withContext(Dispatchers.IO) { MediaRepo.loadMemories(context) }
             photos = all
             albums = alb
             favorites = all.filter { it.isFavorite }
+            trashed = tr
+            memories = mem
             errorCount = ErrorLog.count(context)
             loading = false
         }
@@ -158,12 +167,38 @@ fun NovaGalleryApp() {
         if (permissionsGranted) reload()
     }
 
-    // System confirmation for deletes (single + batch).
+    // v1.4: deleting moves photos to the Trash (Android 11+), so they can
+    // be restored for 30 days. The system confirmation covers trash,
+    // restore and permanent delete alike.
+    val trashLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            onStatus("Moved to Trash")
+            selected = emptySet()
+            reload()
+            openAlbum?.let { reloadAlbum(it) }
+        } else {
+            onStatus("Cancelled")
+        }
+    }
+    val restoreLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            onStatus("Restored")
+            selected = emptySet()
+            reload()
+        } else {
+            onStatus("Cancelled")
+        }
+    }
+    // System confirmation for permanent deletes.
     val deleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            onStatus("Deleted")
+            onStatus("Deleted permanently")
             selected = emptySet()
             reload()
             openAlbum?.let { reloadAlbum(it) }
@@ -172,15 +207,48 @@ fun NovaGalleryApp() {
         }
     }
 
+    // v1.4: delete now means "move to Trash" (restorable for 30 days).
     fun deleteSelected() {
         // v1.3: selection is keyed by content URI, not the MediaStore row id —
         // Images and Videos are separate tables, so an image and a video can
         // share the same _ID and the old Set<Long> treated them as one item.
-        val items = photos.filter { selected.contains(it.uri.toString()) } +
-            albumPhotos.filter { selected.contains(it.uri.toString()) }
-        val unique = items.distinctBy { it.id }
-        if (unique.isEmpty()) return
-        MediaRepo.deleteMultiple(context, unique) { deleted, sender ->
+        val items = (photos + albumPhotos + searchResults + trashed)
+            .filter { selected.contains(it.uri.toString()) }
+            .distinctBy { it.uri }
+        if (items.isEmpty()) return
+        val sender = MediaRepo.trashItems(context, items, true)
+        if (sender != null) {
+            trashLauncher.launch(
+                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+            )
+        } else {
+            // Below Android 11 there is no Trash API — the delete was permanent.
+            onStatus("Deleted")
+            selected = emptySet()
+            reload()
+            openAlbum?.let { reloadAlbum(it) }
+        }
+    }
+
+    fun restoreSelected() {
+        val items = trashed.filter { selected.contains(it.uri.toString()) }
+        if (items.isEmpty()) return
+        val sender = MediaRepo.trashItems(context, items, false)
+        if (sender != null) {
+            restoreLauncher.launch(
+                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+            )
+        } else {
+            onStatus("Restored")
+            selected = emptySet()
+            reload()
+        }
+    }
+
+    fun deletePermanentlySelected() {
+        val items = trashed.filter { selected.contains(it.uri.toString()) }
+        if (items.isEmpty()) return
+        MediaRepo.deleteMultiple(context, items) { deleted, sender ->
             if (sender != null) {
                 deleteLauncher.launch(
                     androidx.activity.result.IntentSenderRequest.Builder(sender).build()
@@ -189,14 +257,14 @@ fun NovaGalleryApp() {
                 onStatus(if (deleted > 0) "Deleted $deleted item${if (deleted > 1) "s" else ""}" else "Couldn't delete")
                 selected = emptySet()
                 reload()
-                openAlbum?.let { reloadAlbum(it) }
             }
         }
     }
 
-    fun openViewer(list: List<MediaItem>, index: Int) {
+    fun openViewer(list: List<MediaItem>, index: Int, isTrash: Boolean = false) {
         viewerList = list
         viewerIndex = index
+        viewerIsTrash = isTrash
     }
 
     val viewerItem = viewerIndex?.let { viewerList.getOrNull(it) }
@@ -211,6 +279,22 @@ fun NovaGalleryApp() {
                 viewerItem != null -> ViewerScreen(
                     items = viewerList,
                     initialIndex = viewerIndex ?: 0,
+                    isTrash = viewerIsTrash,
+                    onRestore = if (viewerIsTrash) {
+                        {
+                            val item = viewerItem
+                            if (item != null) {
+                                val sender = MediaRepo.trashItems(context, listOf(item), false)
+                                if (sender != null) {
+                                    restoreLauncher.launch(
+                                        androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+                                    )
+                                }
+                                viewerIndex = null
+                                reload()
+                            }
+                        }
+                    } else null,
                     onBack = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onDeleted = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onStatus = ::onStatus
@@ -241,15 +325,24 @@ fun NovaGalleryApp() {
                                         }
                                     },
                                     actions = {
-                                        IconButton(onClick = {
-                                            val items = (photos + albumPhotos).filter { selected.contains(it.uri.toString()) }.distinctBy { it.uri }
-                                            if (items.isNotEmpty()) {
-                                                val intent = Intent.createChooser(MediaRepo.shareMultipleIntent(items), "Share")
-                                                context.startActivity(intent)
+                                        if (tab == GalleryTab.TRASH) {
+                                            IconButton(onClick = { restoreSelected() }) {
+                                                Icon(Icons.Filled.Restore, "Restore selected")
                                             }
-                                        }) { Icon(Icons.Filled.Share, "Share selected") }
-                                        IconButton(onClick = { showDeleteConfirm = true }) {
-                                            Icon(Icons.Filled.Delete, "Delete selected", tint = NovaDanger)
+                                            IconButton(onClick = { showDeleteConfirm = true }) {
+                                                Icon(Icons.Filled.Delete, "Delete permanently", tint = NovaDanger)
+                                            }
+                                        } else {
+                                            IconButton(onClick = {
+                                                val items = (photos + albumPhotos).filter { selected.contains(it.uri.toString()) }.distinctBy { it.uri }
+                                                if (items.isNotEmpty()) {
+                                                    val intent = Intent.createChooser(MediaRepo.shareMultipleIntent(items), "Share")
+                                                    context.startActivity(intent)
+                                                }
+                                            }) { Icon(Icons.Filled.Share, "Share selected") }
+                                            IconButton(onClick = { showDeleteConfirm = true }) {
+                                                Icon(Icons.Filled.Delete, "Move to Trash", tint = NovaDanger)
+                                            }
                                         }
                                     }
                                 )
@@ -304,6 +397,12 @@ fun NovaGalleryApp() {
                                         onClick = { tab = GalleryTab.FAVORITES },
                                         icon = { Icon(Icons.Filled.Star, null) },
                                         label = { Text("Favorites") }
+                                    )
+                                    NavigationBarItem(
+                                        selected = tab == GalleryTab.TRASH,
+                                        onClick = { tab = GalleryTab.TRASH },
+                                        icon = { Icon(Icons.Filled.Delete, null) },
+                                        label = { Text("Trash") }
                                     )
                                 }
                             }
@@ -373,6 +472,33 @@ fun NovaGalleryApp() {
                                         EmptyState("No albums yet — allow access to see your photos")
                                     } else {
                                         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                            if (memories.isNotEmpty()) {
+                                                item {
+                                                    Column {
+                                                        Text(
+                                                            "Memories — On this day",
+                                                            style = MaterialTheme.typography.titleMedium,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(bottom = 8.dp)
+                                                        )
+                                                        Row(
+                                                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                        ) {
+                                                            memories.take(10).forEach { memory ->
+                                                                AsyncImage(
+                                                                    model = memory.uri,
+                                                                    contentDescription = memory.displayName,
+                                                                    contentScale = ContentScale.Crop,
+                                                                    modifier = Modifier.size(120.dp).clip(MaterialTheme.shapes.medium)
+                                                                        .clickable { openViewer(memories, memories.indexOf(memory)) }
+                                                                )
+                                                            }
+                                                        }
+                                                        Spacer(Modifier.height(8.dp))
+                                                    }
+                                                }
+                                            }
                                             items(albums) { album ->
                                                 AlbumRow(album) {
                                                     openAlbum = album.name
@@ -412,6 +538,28 @@ fun NovaGalleryApp() {
                                         )
                                     }
                                 }
+                                GalleryTab.TRASH -> {
+                                    if (trashed.isEmpty()) {
+                                        EmptyState("Trash is empty — deleted photos can be restored here for 30 days")
+                                    } else {
+                                        Column(Modifier.fillMaxSize()) {
+                                            Text(
+                                                "${trashed.size} item${if (trashed.size > 1) "s" else ""} — deleted items are permanently removed after 30 days",
+                                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            MediaGrid(
+                                                items = trashed,
+                                                columns = gridColumns,
+                                                selected = selected,
+                                                onTap = { idx -> openViewer(trashed, idx, isTrash = true) },
+                                                onLongPress = { item ->
+                                                    selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -421,15 +569,26 @@ fun NovaGalleryApp() {
     }
 
     if (showDeleteConfirm) {
+        val inTrash = tab == GalleryTab.TRASH
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Delete ${selected.size} item${if (selected.size > 1) "s" else ""}?") },
-            text = { Text("The selected photos and videos will be deleted from your device.") },
+            title = {
+                Text(
+                    if (inTrash) "Delete ${selected.size} item${if (selected.size > 1) "s" else ""} permanently?"
+                    else "Move ${selected.size} item${if (selected.size > 1) "s" else ""} to Trash?"
+                )
+            },
+            text = {
+                Text(
+                    if (inTrash) "This cannot be undone."
+                    else "They can be restored from Trash for 30 days."
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     showDeleteConfirm = false
-                    deleteSelected()
-                }) { Text("Delete", color = NovaDanger) }
+                    if (inTrash) deletePermanentlySelected() else deleteSelected()
+                }) { Text(if (inTrash) "Delete" else "Move to Trash", color = NovaDanger) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }

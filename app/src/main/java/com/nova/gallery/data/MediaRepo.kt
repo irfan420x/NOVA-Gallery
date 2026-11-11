@@ -216,6 +216,112 @@ object MediaRepo {
         onResult(deleted, sender)
     }
 
+    // ---------- v1.4: Trash (30-day recycle bin, Android 11+) ----------
+    // Deleting a photo moves it to the system Trash instead of destroying
+    // it — the system permanently deletes trashed items after 30 days.
+    // On Android 10 and below there is no Trash API, so delete is permanent.
+
+    /** True when the system Trash API is available (Android 11+). */
+    fun hasTrash(context: Context): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+
+    /**
+     * Move items to (or out of) the Trash. Returns the system confirmation
+     * sender to launch, or null when it was done directly (API < 30 falls
+     * back to a permanent delete for trash=true).
+     */
+    fun trashItems(
+        context: Context,
+        items: List<MediaItem>,
+        trash: Boolean
+    ): android.content.IntentSender? {
+        if (items.isEmpty()) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return try {
+                MediaStore.createTrashRequest(
+                    context.contentResolver, items.map { it.uri }, trash
+                ).intentSender
+            } catch (e: Exception) {
+                ErrorLog.log(context, "Gallery", "Trash request failed", e)
+                null
+            }
+        }
+        // No Trash API below Android 11: trashing is a permanent delete.
+        if (trash) items.forEach { delete(context, it) }
+        return null
+    }
+
+    /** Items currently in the Trash, newest first. */
+    fun loadTrashed(context: Context): List<MediaItem> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+        val favorites = FavoriteStore.load(context)
+        val out = ArrayList<MediaItem>()
+        try {
+            val bundle = android.os.Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED,
+                    MediaStore.MATCH_INCLUDE)
+            }
+            for (collection in listOf(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            )) {
+                context.contentResolver.query(collection, PROJECTION, bundle, null)?.use { c ->
+                    val idI = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                    val nameI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val mimeI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                    val modI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                    val takenI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN)
+                    val sizeI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                    val wI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.WIDTH)
+                    val hI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.HEIGHT)
+                    val bucketI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                    val pathI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                    val durI = c.getColumnIndex(MediaStore.MediaColumns.DURATION)
+                    while (c.moveToNext()) {
+                        val id = c.getLong(idI)
+                        val mime = c.getString(mimeI) ?: ""
+                        val uri = android.content.ContentUris.withAppendedId(collection, id)
+                        out += MediaItem(
+                            id = id, uri = uri,
+                            displayName = c.getString(nameI) ?: "Untitled",
+                            kind = if (mime.startsWith("video/")) MediaKind.VIDEO else MediaKind.IMAGE,
+                            mimeType = mime,
+                            dateModified = c.getLong(modI),
+                            dateTaken = c.getLong(takenI),
+                            sizeBytes = c.getLong(sizeI),
+                            width = c.getInt(wI), height = c.getInt(hI),
+                            durationMs = if (durI >= 0) c.getLong(durI) else 0L,
+                            bucket = c.getString(bucketI) ?: "Unknown",
+                            relativePath = c.getString(pathI) ?: "",
+                            isFavorite = favorites.contains(uri.toString())
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            ErrorLog.log(context, "Gallery", "Failed to load trash", e)
+            return emptyList()
+        }
+        return out.sortedByDescending { it.dateModified }
+    }
+
+    /** Photos from this day in past years ("On this day"). */
+    fun loadMemories(context: Context): List<MediaItem> {
+        val all = loadAll(context, 5000)
+        if (all.isEmpty()) return emptyList()
+        val cal = java.util.Calendar.getInstance()
+        val month = cal.get(java.util.Calendar.MONTH)
+        val day = cal.get(java.util.Calendar.DAY_OF_MONTH)
+        val year = cal.get(java.util.Calendar.YEAR)
+        return all.filter { item ->
+            val taken = item.dateTaken.takeIf { it > 0 } ?: (item.dateModified * 1000)
+            val c = java.util.Calendar.getInstance().apply { timeInMillis = taken }
+            c.get(java.util.Calendar.MONTH) == month &&
+                c.get(java.util.Calendar.DAY_OF_MONTH) == day &&
+                c.get(java.util.Calendar.YEAR) < year
+        }.sortedByDescending { it.dateTaken.takeIf { t -> t > 0 } ?: (it.dateModified * 1000) }
+    }
+
     fun shareIntent(item: MediaItem): Intent {
         return Intent(Intent.ACTION_SEND).apply {
             type = item.mimeType.ifEmpty { if (item.isVideo) "video/*" else "image/*" }

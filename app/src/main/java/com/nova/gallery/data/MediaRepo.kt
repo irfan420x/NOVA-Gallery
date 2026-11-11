@@ -142,8 +142,11 @@ object MediaRepo {
     fun search(context: Context, query: String, limit: Int = 500): List<MediaItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        val sel = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
-        val args = arrayOf("%$q%")
+        // v1.3: escape LIKE wildcards so a literal % or _ in a file name is
+        // searched for, not treated as a pattern.
+        val escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val sel = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? ESCAPE '\\'"
+        val args = arrayOf("%$escaped%")
         val images = readItems(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, sel, args, limit)
         val videos = readItems(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, sel, args, limit)
         return (images + videos).sortedByDescending { it.dateModified }.take(limit)

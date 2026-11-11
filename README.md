@@ -50,6 +50,15 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.3** — The swipe bug, found by a full audit: the zoomable image's
+  `transformable()` modifier consumed every single-finger horizontal drag
+  as a "pan", so the HorizontalPager never saw the swipe and photos never
+  changed. Panning is now gated to the zoomed state (`canPan`), so at 1x
+  the pager gets the swipe and zoomed in the image pans. Also from the
+  audit: multi-select is now keyed by content URI (an image and a video
+  can share the same MediaStore row id, so the old id-based selection
+  treated them as one item); the album grid refreshes after closing the
+  viewer; search escapes `%`/`_` so they are searched literally.
 - **v1.2** — Swipe to change photos in the viewer (HorizontalPager; zoom
   locks paging while zoomed in) and the system back button now steps back
   through the layers — viewer → grid, album → albums, search → clear,

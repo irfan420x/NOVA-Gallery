@@ -4,6 +4,7 @@ import android.content.Intent
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -225,6 +226,7 @@ private fun VideoPage(item: MediaItem) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ZoomableImagePage(
     item: MediaItem,
@@ -238,14 +240,10 @@ private fun ZoomableImagePage(
         offset = if (scale > 1f) offset + panChange else Offset.Zero
         if (isCurrent) onZoomChanged(scale > 1f)
     }
-    // Reset zoom when leaving the page is handled by remember(item.uri);
-    // also report "not zoomed" when this page stops being current.
-    LaunchedEffect(isCurrent) {
-        if (!isCurrent && scale > 1f) {
-            scale = 1f
-            offset = Offset.Zero
-        }
-    }
+    // v1.3: the swipe bug — transformable() consumed every single-finger
+    // horizontal drag as a "pan", so the HorizontalPager never saw the swipe
+    // and photos never changed. canPan gates panning to the zoomed state:
+    // at 1x the pager gets the swipe; zoomed in, the image pans instead.
     AsyncImage(
         model = item.uri,
         contentDescription = item.displayName,
@@ -255,7 +253,7 @@ private fun ZoomableImagePage(
                 scaleX = scale, scaleY = scale,
                 translationX = offset.x, translationY = offset.y
             )
-            .transformable(transformState)
+            .transformable(transformState, canPan = { scale > 1f })
     )
 }
 

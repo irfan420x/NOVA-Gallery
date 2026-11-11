@@ -109,7 +109,7 @@ fun NovaGalleryApp() {
     var loading by remember { mutableStateOf(true) }
     var status by remember { mutableStateOf<String?>(null) }
     var showErrorLog by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var errorCount by remember { mutableStateOf(ErrorLog.count(context)) }
     var permissionsGranted by remember {
@@ -173,8 +173,11 @@ fun NovaGalleryApp() {
     }
 
     fun deleteSelected() {
-        val items = photos.filter { selected.contains(it.id) } +
-            albumPhotos.filter { selected.contains(it.id) }
+        // v1.3: selection is keyed by content URI, not the MediaStore row id —
+        // Images and Videos are separate tables, so an image and a video can
+        // share the same _ID and the old Set<Long> treated them as one item.
+        val items = photos.filter { selected.contains(it.uri.toString()) } +
+            albumPhotos.filter { selected.contains(it.uri.toString()) }
         val unique = items.distinctBy { it.id }
         if (unique.isEmpty()) return
         MediaRepo.deleteMultiple(context, unique) { deleted, sender ->
@@ -208,7 +211,7 @@ fun NovaGalleryApp() {
                 viewerItem != null -> ViewerScreen(
                     items = viewerList,
                     initialIndex = viewerIndex ?: 0,
-                    onBack = { viewerIndex = null; reload() },
+                    onBack = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onDeleted = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onStatus = ::onStatus
                 )
@@ -239,7 +242,7 @@ fun NovaGalleryApp() {
                                     },
                                     actions = {
                                         IconButton(onClick = {
-                                            val items = (photos + albumPhotos).filter { selected.contains(it.id) }.distinctBy { it.id }
+                                            val items = (photos + albumPhotos).filter { selected.contains(it.uri.toString()) }.distinctBy { it.uri }
                                             if (items.isNotEmpty()) {
                                                 val intent = Intent.createChooser(MediaRepo.shareMultipleIntent(items), "Share")
                                                 context.startActivity(intent)
@@ -342,7 +345,7 @@ fun NovaGalleryApp() {
                                         selected = selected,
                                         onTap = { idx -> openViewer(searchResults, idx) },
                                         onLongPress = { item ->
-                                            selected = if (selected.contains(item.id)) selected - item.id else selected + item.id
+                                            selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
                                         }
                                     )
                                 }
@@ -360,7 +363,7 @@ fun NovaGalleryApp() {
                                         selected = selected,
                                         onTap = { idx -> openViewer(albumPhotos, idx) },
                                         onLongPress = { item ->
-                                            selected = if (selected.contains(item.id)) selected - item.id else selected + item.id
+                                            selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
                                         }
                                     )
                                 }
@@ -389,7 +392,7 @@ fun NovaGalleryApp() {
                                             selected = selected,
                                             onTap = { idx -> openViewer(photos, idx) },
                                             onLongPress = { item ->
-                                                selected = if (selected.contains(item.id)) selected - item.id else selected + item.id
+                                                selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
                                             }
                                         )
                                     }
@@ -404,7 +407,7 @@ fun NovaGalleryApp() {
                                             selected = selected,
                                             onTap = { idx -> openViewer(favorites, idx) },
                                             onLongPress = { item ->
-                                                selected = if (selected.contains(item.id)) selected - item.id else selected + item.id
+                                                selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
                                             }
                                         )
                                     }
@@ -480,7 +483,7 @@ private fun AlbumRow(album: Album, onClick: () -> Unit) {
 private fun MediaGrid(
     items: List<MediaItem>,
     columns: Int,
-    selected: Set<Long>,
+    selected: Set<String>,
     onTap: (Int) -> Unit,
     onLongPress: (MediaItem) -> Unit
 ) {
@@ -493,7 +496,7 @@ private fun MediaGrid(
     ) {
         items(items.size) { index ->
             val item = items[index]
-            val isSelected = selected.contains(item.id)
+            val isSelected = selected.contains(item.uri.toString())
             Box(
                 Modifier.aspectRatio(1f)
                     .clip(RoundedCornerShape(8.dp))

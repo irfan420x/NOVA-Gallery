@@ -54,7 +54,17 @@ enum class GalleryTab { ALBUMS, PHOTOS, FAVORITES, TRASH }
 
 private fun mediaPermissions(): Array<String> {
     return if (Build.VERSION.SDK_INT >= 33) {
-        arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+        // v1.6: include READ_MEDIA_VISUAL_USER_SELECTED on API 34+ so the
+        // system offers "Select photos and videos" and the app recognizes it.
+        if (Build.VERSION.SDK_INT >= 34) {
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+        }
     } else {
         arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
@@ -126,7 +136,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
 
     fun reload() {
         scope.launch {
-            loading = true
+            // v1.6: the spinner shows only on the first load — the old code
+            // set loading=true on every resume, blanking the grid to a
+            // spinner each time the user came back from another app.
+            val firstLoad = photos.isEmpty() && albums.isEmpty() && trashed.isEmpty()
+            if (firstLoad) loading = true
             // v1.5: one MediaStore scan — albums, memories and favorites are
             // derived from the same list instead of re-scanning 3 more times.
             val all = withContext(Dispatchers.IO) { MediaRepo.loadAll(context) }
@@ -136,6 +150,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
             favorites = all.filter { it.isFavorite }
             trashed = tr
             memories = MediaRepo.loadMemoriesFrom(all)
+            // v1.6: search results go stale after a delete in the viewer —
+            // re-run the current search so deleted items disappear.
+            if (query.isNotBlank()) {
+                searchResults = withContext(Dispatchers.IO) { MediaRepo.search(context, query) }
+            }
             errorCount = ErrorLog.count(context)
             loading = false
         }
@@ -160,7 +179,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         }
     }
 
-    LaunchedEffect(Unit) { if (permissionsGranted) reload() }
+    // v1.6: always reload on launch — even without permission, so the
+    // empty states render instead of an infinite spinner (the old code
+    // only reloaded when permission was already granted, so "Continue
+    // without it" left loading=true forever).
+    LaunchedEffect(Unit) { reload() }
 
     // v1.5: "Open with Gallery" — an incoming VIEW intent opens the viewer
     // with that one photo/video (the sender grants URI permission).
@@ -177,10 +200,17 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
 
     // v1.5: refresh when the app comes back to the foreground — a photo
     // taken with the camera while Gallery was open now appears.
+    // v1.6: re-check the permission first (granting it in system Settings
+    // used to go unnoticed until a restart), and refresh the open album
+    // too — it used to stay stale until the user left and re-entered it.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && permissionsGranted) reload()
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                permissionsGranted = MediaRepo.hasMediaPermission(context)
+                reload()
+                openAlbum?.let { reloadAlbum(it) }
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -245,32 +275,42 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
             .filter { selected.contains(it.uri.toString()) }
             .distinctBy { it.uri }
         if (items.isEmpty()) return
-        val sender = MediaRepo.trashItems(context, items, true)
-        if (sender != null) {
-            trashLauncher.launch(
-                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-            )
-        } else {
-            // Below Android 11 there is no Trash API — the delete was permanent.
-            onStatus("Deleted")
-            selected = emptySet()
-            reload()
-            openAlbum?.let { reloadAlbum(it) }
+        when (val result = MediaRepo.trashItems(context, items, true)) {
+            is MediaRepo.TrashResult.NeedsConfirmation -> {
+                trashLauncher.launch(
+                    androidx.activity.result.IntentSenderRequest.Builder(result.sender).build()
+                )
+            }
+            MediaRepo.TrashResult.Done -> {
+                // Below Android 11 there is no Trash API — the delete was permanent.
+                onStatus("Deleted")
+                selected = emptySet()
+                reload()
+                openAlbum?.let { reloadAlbum(it) }
+            }
+            MediaRepo.TrashResult.Failed -> {
+                // v1.6: a failed trash request must NOT fall back to a
+                // permanent delete — the photo stays, with an honest error.
+                onStatus("Couldn't move to Trash — try again")
+            }
         }
     }
 
     fun restoreSelected() {
         val items = trashed.filter { selected.contains(it.uri.toString()) }
         if (items.isEmpty()) return
-        val sender = MediaRepo.trashItems(context, items, false)
-        if (sender != null) {
-            restoreLauncher.launch(
-                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-            )
-        } else {
-            onStatus("Restored")
-            selected = emptySet()
-            reload()
+        when (val result = MediaRepo.trashItems(context, items, false)) {
+            is MediaRepo.TrashResult.NeedsConfirmation -> {
+                restoreLauncher.launch(
+                    androidx.activity.result.IntentSenderRequest.Builder(result.sender).build()
+                )
+            }
+            MediaRepo.TrashResult.Done -> {
+                onStatus("Restored")
+                selected = emptySet()
+                reload()
+            }
+            MediaRepo.TrashResult.Failed -> onStatus("Couldn't restore — try again")
         }
     }
 
@@ -313,14 +353,23 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                         {
                             val item = viewerItem
                             if (item != null) {
-                                val sender = MediaRepo.trashItems(context, listOf(item), false)
-                                if (sender != null) {
-                                    restoreLauncher.launch(
-                                        androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-                                    )
+                                when (val result = MediaRepo.trashItems(context, listOf(item), false)) {
+                                    is MediaRepo.TrashResult.NeedsConfirmation -> {
+                                        restoreLauncher.launch(
+                                            androidx.activity.result.IntentSenderRequest.Builder(result.sender).build()
+                                        )
+                                        viewerIndex = null
+                                        reload()
+                                    }
+                                    MediaRepo.TrashResult.Done -> {
+                                        viewerIndex = null
+                                        reload()
+                                    }
+                                    // v1.6: on failure keep the viewer open
+                                    // with an honest message — the old code
+                                    // closed the viewer and said nothing.
+                                    MediaRepo.TrashResult.Failed -> onStatus("Couldn't restore — try again")
                                 }
-                                viewerIndex = null
-                                reload()
                             }
                         }
                     } else null,
@@ -363,7 +412,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                             }
                                         } else {
                                             IconButton(onClick = {
-                                                val items = (photos + albumPhotos).filter { selected.contains(it.uri.toString()) }.distinctBy { it.uri }
+                                                // v1.6: include searchResults — sharing a
+                                                // selection from search did nothing (the
+                                                // list was built from photos+albumPhotos
+                                                // only, so search items were silently dropped).
+                                                val items = (photos + albumPhotos + searchResults).filter { selected.contains(it.uri.toString()) }.distinctBy { it.uri }
                                                 if (items.isNotEmpty()) {
                                                     val intent = Intent.createChooser(MediaRepo.shareMultipleIntent(items), "Share")
                                                     context.startActivity(intent)

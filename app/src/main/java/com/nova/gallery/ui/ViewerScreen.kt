@@ -6,6 +6,7 @@ import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
@@ -22,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -88,25 +90,31 @@ fun ViewerScreen(
     // instead of destroying it. Below Android 11 there is no Trash API, so
     // the delete is permanent.
     fun doDelete(item: MediaItem) {
-        val sender = MediaRepo.trashItems(context, listOf(item), true)
-        if (sender != null) {
-            deleteLauncher.launch(
-                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-            )
-        } else {
-            when (val result = MediaRepo.delete(context, item)) {
-                is MediaRepo.DeleteResult.Deleted -> {
-                    onStatus("Deleted")
-                    onDeleted()
-                }
-                is MediaRepo.DeleteResult.NeedsConfirmation -> {
-                    val s = result.exception.userAction.actionIntent.intentSender
-                    deleteLauncher.launch(
-                        androidx.activity.result.IntentSenderRequest.Builder(s).build()
-                    )
-                }
-                is MediaRepo.DeleteResult.Failed -> onStatus("Couldn't delete: ${result.error.message}")
+        when (val result = MediaRepo.trashItems(context, listOf(item), true)) {
+            is MediaRepo.TrashResult.NeedsConfirmation -> {
+                deleteLauncher.launch(
+                    androidx.activity.result.IntentSenderRequest.Builder(result.sender).build()
+                )
             }
+            MediaRepo.TrashResult.Done -> {
+                // Below Android 11: no Trash API — the delete is permanent.
+                when (val deleted = MediaRepo.delete(context, item)) {
+                    is MediaRepo.DeleteResult.Deleted -> {
+                        onStatus("Deleted")
+                        onDeleted()
+                    }
+                    is MediaRepo.DeleteResult.NeedsConfirmation -> {
+                        val s = deleted.exception.userAction.actionIntent.intentSender
+                        deleteLauncher.launch(
+                            androidx.activity.result.IntentSenderRequest.Builder(s).build()
+                        )
+                    }
+                    is MediaRepo.DeleteResult.Failed -> onStatus("Couldn't delete: ${deleted.error.message}")
+                }
+            }
+            // v1.6: a failed trash request must NOT fall back to a permanent
+            // delete — the old code destroyed the photo and said "Deleted".
+            MediaRepo.TrashResult.Failed -> onStatus("Couldn't move to Trash — try again")
         }
     }
 
@@ -156,7 +164,7 @@ fun ViewerScreen(
             ) { page ->
                 val item = items[page]
                 if (item.isVideo) {
-                    VideoPage(item)
+                    VideoPage(item, isCurrent = page == pagerState.currentPage)
                 } else {
                     ZoomableImagePage(
                         item = item,
@@ -241,16 +249,25 @@ fun ViewerScreen(
 }
 
 @Composable
-private fun VideoPage(item: MediaItem) {
+private fun VideoPage(item: MediaItem, isCurrent: Boolean) {
+    // v1.6: stop the video when the page is no longer current — the pager
+    // keeps adjacent pages composed, so a playing video's audio kept going
+    // over the next photo. onDispose stops it when the page leaves entirely.
+    var videoView by remember { mutableStateOf<VideoView?>(null) }
+    LaunchedEffect(isCurrent) {
+        if (!isCurrent) videoView?.pause()
+    }
     AndroidView(
         factory = { ctx ->
             VideoView(ctx).apply {
                 setVideoURI(item.uri)
                 setMediaController(MediaController(ctx))
-                setOnPreparedListener { it.isLooping = false; start() }
+                setOnPreparedListener { it.isLooping = false; if (isCurrent) start() }
+                videoView = this
             }
         },
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize(),
+        onRelease = { it.stopPlayback() }
     )
 }
 
@@ -263,9 +280,24 @@ private fun ZoomableImagePage(
 ) {
     var scale by remember(item.uri) { mutableFloatStateOf(1f) }
     var offset by remember(item.uri) { mutableStateOf(Offset.Zero) }
+    // v1.6: leaving a zoomed photo resets it — the old code remembered the
+    // zoom per photo, so coming back showed a zoomed, panned-off-screen
+    // image with no reset and the swipe hijacked by pan.
+    LaunchedEffect(isCurrent) {
+        if (!isCurrent) {
+            scale = 1f
+            offset = Offset.Zero
+        }
+    }
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 6f)
-        offset = if (scale > 1f) offset + panChange else Offset.Zero
+        // v1.6: clamp the pan so the image can't be dragged off-screen.
+        val maxX = 400f * (scale - 1f)
+        val maxY = 400f * (scale - 1f)
+        offset = if (scale > 1f) Offset(
+            (offset.x + panChange.x).coerceIn(-maxX, maxX),
+            (offset.y + panChange.y).coerceIn(-maxY, maxY)
+        ) else Offset.Zero
         if (isCurrent) onZoomChanged(scale > 1f)
     }
     // v1.3: the swipe bug — transformable() consumed every single-finger
@@ -281,6 +313,13 @@ private fun ZoomableImagePage(
                 scaleX = scale, scaleY = scale,
                 translationX = offset.x, translationY = offset.y
             )
+            // v1.6: double-tap toggles between 1x and 2x zoom.
+            .pointerInput(item.uri) {
+                detectTapGestures(onDoubleTap = {
+                    if (scale > 1f) { scale = 1f; offset = Offset.Zero; onZoomChanged(false) }
+                    else { scale = 2f; onZoomChanged(true) }
+                })
+            }
             .transformable(transformState, canPan = { scale > 1f })
     )
 }

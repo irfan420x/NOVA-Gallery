@@ -22,7 +22,15 @@ object MediaRepo {
             val videos = androidx.core.content.ContextCompat.checkSelfPermission(
                 context, android.Manifest.permission.READ_MEDIA_VIDEO
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            images || videos
+            // v1.6: Android 14 "Select photos and videos" grants only this
+            // permission — the old check ignored it, so a user who had
+            // granted partial access still saw the permission screen.
+            val selected = if (Build.VERSION.SDK_INT >= 34) {
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else false
+            images || videos || selected
         } else {
             androidx.core.content.ContextCompat.checkSelfPermission(
                 context, android.Manifest.permission.READ_EXTERNAL_STORAGE
@@ -232,25 +240,37 @@ object MediaRepo {
      * sender to launch, or null when it was done directly (API < 30 falls
      * back to a permanent delete for trash=true).
      */
+    /** The outcome of a trash/restore request. The old nullable
+     *  IntentSender was ambiguous: null meant BOTH "no Trash API (API < 30,
+     *  already deleted)" AND "the trash request failed" — and the viewer
+     *  treated a failure as "delete permanently", destroying the photo.
+     *  v1.6: a failure is a failure, never a silent permanent delete. */
+    sealed class TrashResult {
+        class NeedsConfirmation(val sender: android.content.IntentSender) : TrashResult()
+        object Done : TrashResult()
+        object Failed : TrashResult()
+    }
+
     fun trashItems(
         context: Context,
         items: List<MediaItem>,
         trash: Boolean
-    ): android.content.IntentSender? {
-        if (items.isEmpty()) return null
+    ): TrashResult {
+        if (items.isEmpty()) return TrashResult.Done
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return try {
-                MediaStore.createTrashRequest(
+                val sender = MediaStore.createTrashRequest(
                     context.contentResolver, items.map { it.uri }, trash
                 ).intentSender
+                TrashResult.NeedsConfirmation(sender)
             } catch (e: Exception) {
                 ErrorLog.log(context, "Gallery", "Trash request failed", e)
-                null
+                TrashResult.Failed
             }
         }
         // No Trash API below Android 11: trashing is a permanent delete.
         if (trash) items.forEach { delete(context, it) }
-        return null
+        return TrashResult.Done
     }
 
     /** Items currently in the Trash, newest first. */
@@ -258,19 +278,23 @@ object MediaRepo {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
         val favorites = FavoriteStore.load(context)
         val out = ArrayList<MediaItem>()
-        try {
-            val bundle = android.os.Bundle().apply {
-                // MATCH_ONLY = only trashed items. MATCH_INCLUDE (1) returns
-                // the WHOLE library including trashed — the Trash tab would
-                // list every photo and "Delete permanently" could destroy
-                // photos the user never deleted.
-                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED,
-                    MediaStore.MATCH_ONLY)
-            }
-            for (collection in listOf(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            )) {
+        val bundle = android.os.Bundle().apply {
+            // MATCH_ONLY = only trashed items. MATCH_INCLUDE (1) returns
+            // the WHOLE library including trashed — the Trash tab would
+            // list every photo and "Delete permanently" could destroy
+            // photos the user never deleted.
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED,
+                MediaStore.MATCH_ONLY)
+        }
+        // v1.6: each collection has its own try/catch — a failure in the
+        // video query (e.g. partial permission covering only images) used
+        // to discard the trashed images already collected and show an
+        // empty Trash tab.
+        for (collection in listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        )) {
+            try {
                 context.contentResolver.query(collection, PROJECTION, bundle, null)?.use { c ->
                     val idI = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
                     val nameI = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
@@ -303,10 +327,9 @@ object MediaRepo {
                         )
                     }
                 }
+            } catch (e: Exception) {
+                ErrorLog.log(context, "Gallery", "Failed to load trash from one collection", e)
             }
-        } catch (e: Exception) {
-            ErrorLog.log(context, "Gallery", "Failed to load trash", e)
-            return emptyList()
         }
         return out.sortedByDescending { it.dateModified }
     }

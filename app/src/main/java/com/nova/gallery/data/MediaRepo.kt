@@ -104,7 +104,7 @@ object MediaRepo {
     }
 
     /** All photos and videos, newest first. */
-    fun loadAll(context: Context, limit: Int = 2000): List<MediaItem> {
+    fun loadAll(context: Context, limit: Int = 10000): List<MediaItem> {
         val images = readItems(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, null, null, limit)
         val videos = readItems(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, null, null, limit)
         return (images + videos).sortedByDescending { it.dateModified }.take(limit)
@@ -119,8 +119,10 @@ object MediaRepo {
     }
 
     /** Albums with counts and covers, biggest first. */
-    fun loadAlbums(context: Context): List<Album> {
-        val all = loadAll(context, 5000)
+    fun loadAlbums(context: Context): List<Album> = loadAlbumsFrom(loadAll(context, 10000))
+
+    /** Albums derived from an already-loaded list (one scan, not two). */
+    fun loadAlbumsFrom(all: List<MediaItem>): List<Album> {
         if (all.isEmpty()) return emptyList()
         val grouped = all.groupBy { it.bucket }
         return grouped.map { (name, items) ->
@@ -258,8 +260,12 @@ object MediaRepo {
         val out = ArrayList<MediaItem>()
         try {
             val bundle = android.os.Bundle().apply {
+                // MATCH_ONLY = only trashed items. MATCH_INCLUDE (1) returns
+                // the WHOLE library including trashed — the Trash tab would
+                // list every photo and "Delete permanently" could destroy
+                // photos the user never deleted.
                 putInt(MediaStore.QUERY_ARG_MATCH_TRASHED,
-                    MediaStore.MATCH_INCLUDE)
+                    MediaStore.MATCH_ONLY)
             }
             for (collection in listOf(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -305,9 +311,56 @@ object MediaRepo {
         return out.sortedByDescending { it.dateModified }
     }
 
+    /** A MediaItem for a single content URI (e.g. opened from another app). */
+    fun fromUri(context: Context, uri: android.net.Uri): MediaItem? {
+        return try {
+            var name = "Untitled"
+            var mime = context.contentResolver.getType(uri) ?: ""
+            var size = 0L
+            context.contentResolver.query(
+                uri,
+                arrayOf(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.MIME_TYPE,
+                    MediaStore.MediaColumns.SIZE
+                ),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameI = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val mimeI = c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                    val sizeI = c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                    if (nameI >= 0) c.getString(nameI)?.let { name = it }
+                    if (mimeI >= 0) c.getString(mimeI)?.let { mime = it }
+                    if (sizeI >= 0) size = c.getLong(sizeI)
+                }
+            }
+            MediaItem(
+                id = uri.toString().hashCode().toLong(),
+                uri = uri,
+                displayName = name,
+                kind = if (mime.startsWith("video/")) MediaKind.VIDEO else MediaKind.IMAGE,
+                mimeType = mime,
+                dateModified = System.currentTimeMillis() / 1000,
+                dateTaken = 0L,
+                sizeBytes = size,
+                width = 0, height = 0,
+                durationMs = 0L,
+                bucket = "",
+                relativePath = "",
+                isFavorite = false
+            )
+        } catch (e: Exception) {
+            ErrorLog.log(context, "Gallery", "Failed to open shared media", e)
+            null
+        }
+    }
+
     /** Photos from this day in past years ("On this day"). */
-    fun loadMemories(context: Context): List<MediaItem> {
-        val all = loadAll(context, 5000)
+    fun loadMemories(context: Context): List<MediaItem> = loadMemoriesFrom(loadAll(context, 10000))
+
+    /** Memories derived from an already-loaded list (one scan, not two). */
+    fun loadMemoriesFrom(all: List<MediaItem>): List<MediaItem> {
         if (all.isEmpty()) return emptyList()
         val cal = java.util.Calendar.getInstance()
         val month = cal.get(java.util.Calendar.MONTH)
@@ -332,7 +385,15 @@ object MediaRepo {
 
     fun shareMultipleIntent(items: List<MediaItem>): Intent {
         val uris = ArrayList<Uri>(items.map { it.uri })
-        val type = if (items.any { it.isVideo }) "video/*" else "image/*"
+        // v1.5: a mixed image+video selection is "*/*" — labelling it
+        // "video/*" hid image-only targets from the chooser.
+        val hasImages = items.any { !it.isVideo }
+        val hasVideos = items.any { it.isVideo }
+        val type = when {
+            hasImages && hasVideos -> "*/*"
+            hasVideos -> "video/*"
+            else -> "image/*"
+        }
         return Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             this.type = type
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)

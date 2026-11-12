@@ -59,7 +59,12 @@ fun ViewerScreen(
     )
     val currentItem = items.getOrNull(pagerState.currentPage)
     var isZoomed by remember { mutableStateOf(false) }
-    var isFavorite by remember(currentItem?.uri) { mutableStateOf(currentItem?.isFavorite == true) }
+    // v1.5: read the star from FavoriteStore, not from the MediaItem — the
+    // item in the list is stale after a toggle, so swiping away and back
+    // used to show the old star state.
+    var isFavorite by remember(currentItem?.uri) {
+        mutableStateOf(currentItem?.let { com.nova.gallery.data.FavoriteStore.isFavorite(context, it) } == true)
+    }
     var showDetails by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 

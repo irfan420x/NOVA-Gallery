@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { }
             defaultHandler?.uncaughtException(thread, e)
         }
-        setContent { NovaGalleryApp() }
+        setContent { NovaGalleryApp(viewUri = intent?.data) }
     }
 }
 
@@ -92,7 +92,7 @@ private fun saveGridColumns(context: Context, columns: Int) {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun NovaGalleryApp() {
+fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(GalleryTab.ALBUMS) }
@@ -127,15 +127,15 @@ fun NovaGalleryApp() {
     fun reload() {
         scope.launch {
             loading = true
+            // v1.5: one MediaStore scan — albums, memories and favorites are
+            // derived from the same list instead of re-scanning 3 more times.
             val all = withContext(Dispatchers.IO) { MediaRepo.loadAll(context) }
-            val alb = withContext(Dispatchers.IO) { MediaRepo.loadAlbums(context) }
             val tr = withContext(Dispatchers.IO) { MediaRepo.loadTrashed(context) }
-            val mem = withContext(Dispatchers.IO) { MediaRepo.loadMemories(context) }
             photos = all
-            albums = alb
+            albums = MediaRepo.loadAlbumsFrom(all)
             favorites = all.filter { it.isFavorite }
             trashed = tr
-            memories = mem
+            memories = MediaRepo.loadMemoriesFrom(all)
             errorCount = ErrorLog.count(context)
             loading = false
         }
@@ -147,8 +147,13 @@ fun NovaGalleryApp() {
         }
     }
 
+    // v1.5: cancel the previous search before starting a new one — a slow
+    // earlier query used to finish after a later one and overwrite the
+    // results with stale ones.
+    var searchJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun runSearch(q: String) {
-        scope.launch {
+        searchJob?.cancel()
+        searchJob = scope.launch {
             searching = true
             searchResults = withContext(Dispatchers.IO) { MediaRepo.search(context, q) }
             searching = false
@@ -156,6 +161,30 @@ fun NovaGalleryApp() {
     }
 
     LaunchedEffect(Unit) { if (permissionsGranted) reload() }
+
+    // v1.5: "Open with Gallery" — an incoming VIEW intent opens the viewer
+    // with that one photo/video (the sender grants URI permission).
+    LaunchedEffect(viewUri) {
+        viewUri?.let { uri ->
+            val item = withContext(Dispatchers.IO) { MediaRepo.fromUri(context, uri) }
+            if (item != null) {
+                viewerList = listOf(item)
+                viewerIndex = 0
+                viewerIsTrash = false
+            }
+        }
+    }
+
+    // v1.5: refresh when the app comes back to the foreground — a photo
+    // taken with the camera while Gallery was open now appears.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && permissionsGranted) reload()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(status) {
         if (status != null) { kotlinx.coroutines.delay(3000); status = null }
     }

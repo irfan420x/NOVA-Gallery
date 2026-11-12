@@ -54,9 +54,3 @@ fun formatDate(millis: Long): String {
     val sdf = java.text.SimpleDateFormat("d MMM yyyy, h:mm a", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(millis))
 }
-
-fun formatDateShort(millis: Long): String {
-    if (millis <= 0) return "Unknown"
-    val sdf = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault())
-    return sdf.format(java.util.Date(millis))
-}

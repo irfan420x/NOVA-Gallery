@@ -50,6 +50,33 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.7** — Final audit: real pagination — the Photos tab and album view
+  load in pages of 500 with exact totals ("Showing X of Y"), so no photo
+  is hidden behind the old 10,000 cap; album counts are exact
+  (lightweight scan, no cap); Favorites are looked up per URI so old
+  favorites survive; Memories scan the whole library; the "Unknown" album
+  opens (it queried `= 'Unknown'` for a null bucket); an in-app "Allow
+  access" button (goes to Settings when denied permanently); the viewer
+  survives rotation and no longer reopens after being closed; viewer
+  restore waits for the system confirmation; permanent delete reports
+  honestly and keeps failed items selected; deleting an already-deleted
+  file counts as deleted; foreign (VIEW-intent) photos can't be starred
+  or deleted; viewer status messages are visible in the viewer; Details
+  shows "—" instead of fake "0 × 0" / "0:00" / today's date, and "Folder"
+  instead of "Location"; share uses ClipData so the file actually
+  attaches; status timer restarts on repeat messages; error-log badge
+  updates on Clear; Compose keys on all lists; dead code removed.
+- **v1.6** — Second audit: "Continue without it" no longer leaves an
+  infinite spinner; a failed Trash request never falls back to a permanent
+  delete; Android 14 partial access ("Select photos and videos") is
+  recognized; Trash loads per collection; search results refresh after a
+  delete and can be shared; the open album refreshes on resume; video
+  audio stops on page change; zoom resets on page change with double-tap
+  zoom and clamped pan.
+- **v1.5** — First audit: Trash lists only trashed items (MATCH_ONLY —
+  the old MATCH_INCLUDE listed the whole library); Photos cap raised;
+  "Open with Gallery" (VIEW intent) works; refresh on resume; star reads
+  from FavoriteStore; mixed image+video share is `*/*`; search jobs cancel.
 - **v1.4** — Advanced: Trash (30-day recycle bin, Android 11+) — deleting
   a photo moves it to the system Trash instead of destroying it, with
   Restore and permanent delete from the new Trash tab; plus Memories

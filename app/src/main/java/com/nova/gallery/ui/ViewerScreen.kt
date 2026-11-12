@@ -48,6 +48,7 @@ fun ViewerScreen(
     items: List<MediaItem>,
     initialIndex: Int,
     isTrash: Boolean = false,
+    isForeign: Boolean = false,
     onRestore: (() -> Unit)? = null,
     onBack: () -> Unit,
     onDeleted: () -> Unit,
@@ -69,6 +70,16 @@ fun ViewerScreen(
     }
     var showDetails by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    // v1.7: the viewer never showed status messages of its own (e.g.
+    // "Added to favorites") — they only appeared after leaving the viewer.
+    var viewerStatus by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(viewerStatus) {
+        if (viewerStatus != null) { kotlinx.coroutines.delay(2500); viewerStatus = null }
+    }
+    fun showStatus(msg: String) {
+        viewerStatus = msg
+        onStatus(msg)
+    }
 
     BackHandler { onBack() }
 
@@ -79,10 +90,10 @@ fun ViewerScreen(
         androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            onStatus(if (MediaRepo.hasTrash(context)) "Moved to Trash" else "Deleted")
+            showStatus(if (MediaRepo.hasTrash(context)) "Moved to Trash" else "Deleted")
             onDeleted()
         } else {
-            onStatus("Cancelled")
+            showStatus("Cancelled")
         }
     }
 
@@ -97,24 +108,16 @@ fun ViewerScreen(
                 )
             }
             MediaRepo.TrashResult.Done -> {
-                // Below Android 11: no Trash API — the delete is permanent.
-                when (val deleted = MediaRepo.delete(context, item)) {
-                    is MediaRepo.DeleteResult.Deleted -> {
-                        onStatus("Deleted")
-                        onDeleted()
-                    }
-                    is MediaRepo.DeleteResult.NeedsConfirmation -> {
-                        val s = deleted.exception.userAction.actionIntent.intentSender
-                        deleteLauncher.launch(
-                            androidx.activity.result.IntentSenderRequest.Builder(s).build()
-                        )
-                    }
-                    is MediaRepo.DeleteResult.Failed -> onStatus("Couldn't delete: ${deleted.error.message}")
-                }
+                // v1.7: trashItems already did the permanent delete on
+                // API < 30 — the old code deleted a second time here, got
+                // 0 rows back, and reported "Couldn't delete" for a photo
+                // that was already gone (and left the viewer open on it).
+                showStatus("Deleted")
+                onDeleted()
             }
             // v1.6: a failed trash request must NOT fall back to a permanent
             // delete — the old code destroyed the photo and said "Deleted".
-            MediaRepo.TrashResult.Failed -> onStatus("Couldn't move to Trash — try again")
+            MediaRepo.TrashResult.Failed -> showStatus("Couldn't move to Trash — try again")
         }
     }
 
@@ -129,10 +132,10 @@ fun ViewerScreen(
                     if (currentItem != null) {
                         if (isTrash) {
                             TextButton(onClick = { onRestore?.invoke() }) { Text("Restore") }
-                        } else {
+                        } else if (!isForeign) {
                             IconButton(onClick = {
                                 isFavorite = com.nova.gallery.data.FavoriteStore.toggle(context, currentItem)
-                                onStatus(if (isFavorite) "Added to favorites" else "Removed from favorites")
+                                showStatus(if (isFavorite) "Added to favorites" else "Removed from favorites")
                             }) {
                                 Icon(
                                     if (isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
@@ -147,6 +150,17 @@ fun ViewerScreen(
                             IconButton(onClick = { showDeleteConfirm = true }) {
                                 Icon(Icons.Filled.Delete, "Delete", tint = NovaDanger)
                             }
+                        } else {
+                            // v1.7: a photo opened from another app is not
+                            // in this library — starring it would write a
+                            // phantom favorite that can never be un-starred,
+                            // and deleting it is not ours to do. Share and
+                            // Details still work.
+                            IconButton(onClick = {
+                                val intent = Intent.createChooser(MediaRepo.shareIntent(currentItem), "Share")
+                                context.startActivity(intent)
+                            }) { Icon(Icons.Filled.Share, "Share") }
+                            IconButton(onClick = { showDetails = true }) { Icon(Icons.Filled.Info, "Details") }
                         }
                     }
                 }
@@ -188,13 +202,24 @@ fun ViewerScreen(
                 ) { Icon(Icons.Filled.ChevronRight, "Next", tint = Color.White) }
             }
             val current = currentItem
-            if (current?.isVideo == true) {
+            // v1.7: unknown duration (0) is not "0:00".
+            if (current?.isVideo == true && current.durationMs > 0) {
                 Text(
                     formatDuration(current.durationMs),
                     color = Color.White,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
                         .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small)
                         .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+            // v1.7: the viewer status (e.g. "Added to favorites") is shown
+            // here, not only after leaving the viewer.
+            viewerStatus?.let {
+                Text(
+                    it, color = Color.White,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 )
             }
         }
@@ -211,10 +236,20 @@ fun ViewerScreen(
                     DetailRow("Type", current.mimeType.ifEmpty { if (current.isVideo) "Video" else "Image" })
                     DetailRow("Date", formatDate(current.dateTaken.takeIf { it > 0 } ?: (current.dateModified * 1000)))
                     DetailRow("Size", formatBytes(current.sizeBytes))
-                    DetailRow("Resolution", "${current.width} × ${current.height}")
-                    if (current.isVideo) DetailRow("Duration", formatDuration(current.durationMs))
-                    DetailRow("Album", current.bucket)
-                    DetailRow("Location", current.relativePath.ifEmpty { "—" })
+                    // v1.7: unknown resolution is "—", not a fake "0 × 0";
+                    // unknown duration is "Unknown", not "0:00".
+                    DetailRow(
+                        "Resolution",
+                        if (current.width > 0 && current.height > 0) "${current.width} × ${current.height}" else "—"
+                    )
+                    if (current.isVideo) DetailRow(
+                        "Duration",
+                        if (current.durationMs > 0) formatDuration(current.durationMs) else "Unknown"
+                    )
+                    DetailRow("Album", current.bucket.ifEmpty { "—" })
+                    // v1.7: this is a folder path, not a place — label it
+                    // honestly instead of "Location".
+                    DetailRow("Folder", current.relativePath.ifEmpty { "—" })
                 }
             },
             confirmButton = {
@@ -239,7 +274,7 @@ fun ViewerScreen(
                 TextButton(onClick = {
                     showDeleteConfirm = false
                     doDelete(current)
-                }) { Text("Move to Trash", color = NovaDanger) }
+                }) { Text(if (MediaRepo.hasTrash(context)) "Move to Trash" else "Delete", color = NovaDanger) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }

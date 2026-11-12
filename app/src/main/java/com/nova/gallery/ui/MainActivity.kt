@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
@@ -20,14 +21,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,8 +40,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.nova.gallery.data.Album
@@ -51,6 +58,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class GalleryTab { ALBUMS, PHOTOS, FAVORITES, TRASH }
+
+// v1.7: one page of the photo grid / album view. The old code loaded the
+// whole library (capped at 10,000) and hid everything older.
+private const val PAGE_SIZE = 500
+
+// What a permanent-delete confirmation was for, so the result message can
+// be honest about how many items actually went away.
+private sealed interface PendingDelete {
+    data class Batch(val total: Int) : PendingDelete
+    data class Fallback(
+        val deletedUris: List<String>,
+        val failed: Int,
+        val remaining: Int,
+        val confirmUri: String
+    ) : PendingDelete
+}
 
 private fun mediaPermissions(): Array<String> {
     return if (Build.VERSION.SDK_INT >= 33) {
@@ -105,64 +128,137 @@ private fun saveGridColumns(context: Context, columns: Int) {
 fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(GalleryTab.ALBUMS) }
-    var darkTheme by remember { mutableStateOf(loadDarkTheme(context)) }
-    var gridColumns by remember { mutableStateOf(loadGridColumns(context)) }
+    // v1.7: the UI state survives rotation — the old plain remember() lost
+    // the tab, the search, the open album, the selection and the viewer on
+    // every rotate. (The photo lists themselves are reloaded, not saved.)
+    var tab by rememberSaveable { mutableStateOf(GalleryTab.ALBUMS) }
+    var darkTheme by rememberSaveable { mutableStateOf(loadDarkTheme(context)) }
+    var gridColumns by rememberSaveable { mutableStateOf(loadGridColumns(context)) }
     var albums by remember { mutableStateOf<List<Album>>(emptyList()) }
     var photos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var totalPhotos by remember { mutableStateOf(0) }
+    var photosHasMore by remember { mutableStateOf(false) }
+    var photosLoadingMore by remember { mutableStateOf(false) }
     var favorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var trashed by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var memories by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var openAlbum by remember { mutableStateOf<String?>(null) }
+    var openAlbum by rememberSaveable { mutableStateOf<String?>(null) }
     var albumPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var viewerIndex by remember { mutableStateOf<Int?>(null) }
+    var albumTotal by remember { mutableStateOf(0) }
+    var albumHasMore by remember { mutableStateOf(false) }
+    var albumLoading by remember { mutableStateOf(false) }
+    var albumLoadingMore by remember { mutableStateOf(false) }
+    var viewerIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var viewerList by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var viewerIsTrash by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
+    var viewerIsTrash by rememberSaveable { mutableStateOf(false) }
+    var viewerIsForeign by rememberSaveable { mutableStateOf(false) }
+    var savedViewerUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var viewUriHandled by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
+    var hasLoadedOnce by remember { mutableStateOf(false) }
+    var reloadJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
-    var showErrorLog by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var statusKey by remember { mutableStateOf(0) }
+    var showErrorLog by rememberSaveable { mutableStateOf(false) }
+    var selected by rememberSaveable(
+        stateSaver = Saver<Set<String>, List<String>>(
+            save = { it.toList() },
+            restore = { it.toSet() }
+        )
+    ) { mutableStateOf<Set<String>>(emptySet()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var errorCount by remember { mutableStateOf(ErrorLog.count(context)) }
     var permissionsGranted by remember {
         mutableStateOf(MediaRepo.hasMediaPermission(context))
     }
-    var skipPermissions by remember { mutableStateOf(false) }
+    var skipPermissions by rememberSaveable { mutableStateOf(false) }
+    var viewerRestorePending by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<PendingDelete?>(null) }
 
-    fun onStatus(msg: String) { status = msg }
+    fun onStatus(msg: String) {
+        status = msg
+        // v1.7: bump the key on every message — the old LaunchedEffect on
+        // the message itself never restarted when the same text was shown
+        // twice, so the second message could vanish instantly.
+        statusKey++
+    }
 
+    // v1.7: paged reload. The Photos tab used to load the whole library
+    // capped at 10,000 — everything older was invisible. Now it loads one
+    // page (500), with exact totals from count queries, and the albums,
+    // favorites and memories come from their own exact queries instead of
+    // being derived from the capped list. A reload keeps the depth the
+    // user had already scrolled to instead of jumping back to page 1.
     fun reload() {
-        scope.launch {
-            // v1.6: the spinner shows only on the first load — the old code
-            // set loading=true on every resume, blanking the grid to a
-            // spinner each time the user came back from another app.
-            val firstLoad = photos.isEmpty() && albums.isEmpty() && trashed.isEmpty()
-            if (firstLoad) loading = true
-            // v1.5: one MediaStore scan — albums, memories and favorites are
-            // derived from the same list instead of re-scanning 3 more times.
-            val all = withContext(Dispatchers.IO) { MediaRepo.loadAll(context) }
+        reloadJob?.cancel()
+        reloadJob = scope.launch {
+            if (!hasLoadedOnce) loading = true
+            val depth = photos.size.coerceAtLeast(PAGE_SIZE)
+            val page = withContext(Dispatchers.IO) { MediaRepo.loadAll(context, depth, 0) }
+            val total = withContext(Dispatchers.IO) { MediaRepo.countAll(context) }
+            val alb = withContext(Dispatchers.IO) { MediaRepo.loadAlbums(context) }
+            val fav = withContext(Dispatchers.IO) { MediaRepo.loadFavorites(context) }
+            val mem = withContext(Dispatchers.IO) { MediaRepo.loadMemories(context) }
             val tr = withContext(Dispatchers.IO) { MediaRepo.loadTrashed(context) }
-            photos = all
-            albums = MediaRepo.loadAlbumsFrom(all)
-            favorites = all.filter { it.isFavorite }
+            photos = page
+            totalPhotos = total
+            photosHasMore = page.size < total
+            albums = alb
+            favorites = fav
+            memories = mem
             trashed = tr
-            memories = MediaRepo.loadMemoriesFrom(all)
             // v1.6: search results go stale after a delete in the viewer —
             // re-run the current search so deleted items disappear.
             if (query.isNotBlank()) {
                 searchResults = withContext(Dispatchers.IO) { MediaRepo.search(context, query) }
             }
             errorCount = ErrorLog.count(context)
+            hasLoadedOnce = true
             loading = false
         }
     }
 
     fun reloadAlbum(name: String) {
         scope.launch {
-            albumPhotos = withContext(Dispatchers.IO) { MediaRepo.loadAlbum(context, name) }
+            // v1.7: the album view used to flash "This album is empty"
+            // while the new album was still loading — it has its own
+            // loading state now, and the old photos are cleared first.
+            albumLoading = true
+            albumPhotos = emptyList()
+            albumHasMore = false
+            val page = withContext(Dispatchers.IO) { MediaRepo.loadAlbum(context, name, PAGE_SIZE, 0) }
+            val total = withContext(Dispatchers.IO) { MediaRepo.countAlbum(context, name) }
+            albumPhotos = page
+            albumTotal = total
+            albumHasMore = page.size < total
+            albumLoading = false
+        }
+    }
+
+    fun loadMorePhotos() {
+        if (photosLoadingMore || !photosHasMore) return
+        photosLoadingMore = true
+        scope.launch {
+            val next = withContext(Dispatchers.IO) { MediaRepo.loadAll(context, PAGE_SIZE, photos.size) }
+            // Dedup by URI: a photo taken between page loads can shift
+            // the window and appear twice.
+            photos = (photos + next).distinctBy { it.uri }
+            photosHasMore = next.size >= PAGE_SIZE
+            photosLoadingMore = false
+        }
+    }
+
+    fun loadMoreAlbum(name: String) {
+        if (albumLoadingMore || !albumHasMore) return
+        albumLoadingMore = true
+        scope.launch {
+            val next = withContext(Dispatchers.IO) { MediaRepo.loadAlbum(context, name, PAGE_SIZE, albumPhotos.size) }
+            albumPhotos = (albumPhotos + next).distinctBy { it.uri }
+            albumHasMore = next.size >= PAGE_SIZE
+            albumLoadingMore = false
         }
     }
 
@@ -173,9 +269,14 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
     fun runSearch(q: String) {
         searchJob?.cancel()
         searchJob = scope.launch {
-            searching = true
-            searchResults = withContext(Dispatchers.IO) { MediaRepo.search(context, q) }
-            searching = false
+            // v1.7: try/finally — a cancelled search used to leave the
+            // spinner flag set and the results stuck on a spinner.
+            try {
+                searching = true
+                searchResults = withContext(Dispatchers.IO) { MediaRepo.search(context, q) }
+            } finally {
+                searching = false
+            }
         }
     }
 
@@ -187,14 +288,64 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
 
     // v1.5: "Open with Gallery" — an incoming VIEW intent opens the viewer
     // with that one photo/video (the sender grants URI permission).
+    // v1.7: viewUriHandled — without it, rotating the phone after closing
+    // the viewer reopened it, because the intent never changes.
     LaunchedEffect(viewUri) {
-        viewUri?.let { uri ->
-            val item = withContext(Dispatchers.IO) { MediaRepo.fromUri(context, uri) }
-            if (item != null) {
-                viewerList = listOf(item)
-                viewerIndex = 0
-                viewerIsTrash = false
+        if (!viewUriHandled) {
+            viewUriHandled = true
+            viewUri?.let { uri ->
+                val item = withContext(Dispatchers.IO) { MediaRepo.fromUri(context, uri) }
+                if (item != null) {
+                    viewerList = listOf(item)
+                    viewerIndex = 0
+                    viewerIsTrash = false
+                    viewerIsForeign = true
+                    savedViewerUri = item.uri.toString()
+                }
             }
+        }
+    }
+
+    // v1.7: reopen the viewer after a rotation — the photo list itself is
+    // reloaded, so the viewer item is found again by URI in whichever
+    // list holds it. If it is gone (deleted elsewhere), give up quietly.
+    // The viewer "needs restore" when a URI was saved but the current list
+    // cannot resolve it — after a rotation the saved index survives but
+    // the list does not, so checking viewerIndex alone is not enough.
+    LaunchedEffect(loading, photos, trashed, favorites, albumPhotos, searchResults) {
+        val needsRestore = savedViewerUri != null &&
+            viewerList.getOrNull(viewerIndex ?: -1) == null
+        if (!loading && needsRestore) {
+            val uri = savedViewerUri
+            val candidates = listOf(
+                photos to false, albumPhotos to false, favorites to false,
+                trashed to true, searchResults to false
+            )
+            var restored = false
+            for ((list, isTrash) in candidates) {
+                val idx = list.indexOfFirst { it.uri.toString() == uri }
+                if (idx >= 0) {
+                    viewerList = list
+                    viewerIndex = idx
+                    viewerIsTrash = isTrash
+                    restored = true
+                    break
+                }
+            }
+            // A photo opened from another app is in no library list —
+            // rebuild it from its URI so it survives a rotation too.
+            if (!restored && viewerIsForeign && uri != null) {
+                val item = withContext(Dispatchers.IO) {
+                    MediaRepo.fromUri(context, Uri.parse(uri))
+                }
+                if (item != null) {
+                    viewerList = listOf(item)
+                    viewerIndex = 0
+                    viewerIsTrash = false
+                    restored = true
+                }
+            }
+            if (!restored) savedViewerUri = null
         }
     }
 
@@ -215,7 +366,7 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(status) {
+    LaunchedEffect(statusKey) {
         if (status != null) { kotlinx.coroutines.delay(3000); status = null }
     }
 
@@ -226,6 +377,33 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         if (permissionsGranted) reload()
     }
 
+    // v1.7: one place to ask for access. If the user denied permanently
+    // ("Don't ask again"), the system dialog never appears, so go to the
+    // app's Settings page instead of showing a dead button.
+    fun isPermanentlyDenied(): Boolean {
+        val activity = context as? android.app.Activity ?: return false
+        if (MediaRepo.hasMediaPermission(context)) return false
+        val asked = context.getSharedPreferences("nova_gallery", Context.MODE_PRIVATE)
+            .getBoolean("permission_asked", false)
+        if (!asked) return false
+        return mediaPermissions().none { perm ->
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, perm)
+        }
+    }
+
+    fun grantAccess() {
+        if (isPermanentlyDenied()) {
+            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+        } else {
+            context.getSharedPreferences("nova_gallery", Context.MODE_PRIVATE)
+                .edit().putBoolean("permission_asked", true).apply()
+            permissionLauncher.launch(mediaPermissions())
+        }
+    }
+
     // v1.4: deleting moves photos to the Trash (Android 11+), so they can
     // be restored for 30 days. The system confirmation covers trash,
     // restore and permanent delete alike.
@@ -233,7 +411,9 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            onStatus("Moved to Trash")
+            // v1.7: below Android 11 there is no Trash — the delete was
+            // permanent, so say so instead of "Moved to Trash".
+            onStatus(if (MediaRepo.hasTrash(context)) "Moved to Trash" else "Deleted")
             selected = emptySet()
             reload()
             openAlbum?.let { reloadAlbum(it) }
@@ -247,8 +427,17 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             onStatus("Restored")
             selected = emptySet()
+            // v1.7: the viewer only closes when the restore came from the
+            // viewer — the old code closed it before the user had even
+            // confirmed, and a cancel left the viewer gone.
+            if (viewerRestorePending) {
+                viewerRestorePending = false
+                viewerIndex = null
+                savedViewerUri = null
+            }
             reload()
         } else {
+            viewerRestorePending = false
             onStatus("Cancelled")
         }
     }
@@ -257,11 +446,26 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            onStatus("Deleted permanently")
-            selected = emptySet()
+            when (val p = pendingDelete) {
+                is PendingDelete.Batch -> {
+                    onStatus("Deleted ${p.total} item${if (p.total > 1) "s" else ""} permanently")
+                    selected = emptySet()
+                }
+                is PendingDelete.Fallback -> {
+                    val total = p.deletedUris.size + 1
+                    selected = selected - (p.deletedUris + p.confirmUri).toSet()
+                    val parts = StringBuilder("Deleted $total item${if (total > 1) "s" else ""} permanently")
+                    if (p.failed > 0) parts.append(" — ${p.failed} couldn't be deleted")
+                    if (p.remaining > 0) parts.append(" — ${p.remaining} still selected, delete again to continue")
+                    onStatus(parts.toString())
+                }
+                null -> onStatus("Deleted permanently")
+            }
+            pendingDelete = null
             reload()
             openAlbum?.let { reloadAlbum(it) }
         } else {
+            pendingDelete = null
             onStatus("Delete cancelled")
         }
     }
@@ -317,14 +521,36 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
     fun deletePermanentlySelected() {
         val items = trashed.filter { selected.contains(it.uri.toString()) }
         if (items.isEmpty()) return
-        MediaRepo.deleteMultiple(context, items) { deleted, sender ->
+        MediaRepo.deleteMultiple(context, items) { deleted, failed, remaining, confirmItem, sender ->
             if (sender != null) {
+                pendingDelete = if (confirmItem != null) {
+                    PendingDelete.Fallback(
+                        deletedUris = deleted.map { it.uri.toString() },
+                        failed = failed.size,
+                        remaining = remaining.size,
+                        confirmUri = confirmItem.uri.toString()
+                    )
+                } else {
+                    // One system dialog covers the whole batch.
+                    PendingDelete.Batch(items.size)
+                }
                 deleteLauncher.launch(
                     androidx.activity.result.IntentSenderRequest.Builder(sender).build()
                 )
             } else {
-                onStatus(if (deleted > 0) "Deleted $deleted item${if (deleted > 1) "s" else ""}" else "Couldn't delete")
-                selected = emptySet()
+                // No confirmation needed: report exactly what happened
+                // and keep the ones that failed selected.
+                if (deleted.isNotEmpty()) {
+                    selected = selected - deleted.map { it.uri.toString() }.toSet()
+                }
+                val total = deleted.size
+                onStatus(
+                    when {
+                        total == 0 && failed.isNotEmpty() -> "Couldn't delete"
+                        failed.isEmpty() -> "Deleted $total item${if (total > 1) "s" else ""}"
+                        else -> "Deleted $total of ${total + failed.size} items — ${failed.size} couldn't be deleted"
+                    }
+                )
                 reload()
             }
         }
@@ -334,6 +560,8 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         viewerList = list
         viewerIndex = index
         viewerIsTrash = isTrash
+        viewerIsForeign = false
+        savedViewerUri = list.getOrNull(index)?.uri?.toString()
     }
 
     val viewerItem = viewerIndex?.let { viewerList.getOrNull(it) }
@@ -342,27 +570,35 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when {
                 showErrorLog -> {
-                    BackHandler { showErrorLog = false }
-                    ErrorLogScreen(onBack = { showErrorLog = false })
+                    BackHandler { showErrorLog = false; errorCount = ErrorLog.count(context) }
+                    ErrorLogScreen(
+                        onBack = { showErrorLog = false; errorCount = ErrorLog.count(context) },
+                        onCleared = { errorCount = 0 }
+                    )
                 }
                 viewerItem != null -> ViewerScreen(
                     items = viewerList,
                     initialIndex = viewerIndex ?: 0,
                     isTrash = viewerIsTrash,
+                    isForeign = viewerIsForeign,
                     onRestore = if (viewerIsTrash) {
                         {
                             val item = viewerItem
                             if (item != null) {
                                 when (val result = MediaRepo.trashItems(context, listOf(item), false)) {
                                     is MediaRepo.TrashResult.NeedsConfirmation -> {
+                                        // v1.7: wait for the confirmation —
+                                        // the old code closed the viewer and
+                                        // reloaded before the user answered,
+                                        // so a cancel left the viewer gone.
+                                        viewerRestorePending = true
                                         restoreLauncher.launch(
                                             androidx.activity.result.IntentSenderRequest.Builder(result.sender).build()
                                         )
-                                        viewerIndex = null
-                                        reload()
                                     }
                                     MediaRepo.TrashResult.Done -> {
                                         viewerIndex = null
+                                        savedViewerUri = null
                                         reload()
                                     }
                                     // v1.6: on failure keep the viewer open
@@ -373,12 +609,12 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                             }
                         }
                     } else null,
-                    onBack = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
-                    onDeleted = { viewerIndex = null; reload(); openAlbum?.let { reloadAlbum(it) } },
+                    onBack = { viewerIndex = null; savedViewerUri = null; reload(); openAlbum?.let { reloadAlbum(it) } },
+                    onDeleted = { viewerIndex = null; savedViewerUri = null; reload(); openAlbum?.let { reloadAlbum(it) } },
                     onStatus = ::onStatus
                 )
                 !permissionsGranted && !skipPermissions -> PermissionScreen(
-                    onGrant = { permissionLauncher.launch(mediaPermissions()) },
+                    onGrant = { grantAccess() },
                     onSkip = { skipPermissions = true }
                 )
                 else -> {
@@ -389,7 +625,7 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                     } else if (query.isNotBlank()) {
                         BackHandler { query = ""; searchResults = emptyList() }
                     } else if (openAlbum != null) {
-                        BackHandler { openAlbum = null }
+                        BackHandler { openAlbum = null; selected = emptySet() }
                     }
                     val selectionMode = selected.isNotEmpty()
                     Scaffold(
@@ -464,25 +700,25 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.ALBUMS,
-                                        onClick = { tab = GalleryTab.ALBUMS },
+                                        onClick = { tab = GalleryTab.ALBUMS; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.PhotoLibrary, null) },
                                         label = { Text("Albums") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.PHOTOS,
-                                        onClick = { tab = GalleryTab.PHOTOS },
+                                        onClick = { tab = GalleryTab.PHOTOS; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Photo, null) },
                                         label = { Text("Photos") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.FAVORITES,
-                                        onClick = { tab = GalleryTab.FAVORITES },
+                                        onClick = { tab = GalleryTab.FAVORITES; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Star, null) },
                                         label = { Text("Favorites") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.TRASH,
-                                        onClick = { tab = GalleryTab.TRASH },
+                                        onClick = { tab = GalleryTab.TRASH; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Delete, null) },
                                         label = { Text("Trash") }
                                     )
@@ -496,6 +732,22 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                     it, color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
                                 )
+                            }
+                            // v1.7: the way back to permissions — after
+                            // "Continue without it" there was no in-app way
+                            // to grant access again (only system Settings).
+                            if (!permissionsGranted) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "No media access — showing nothing yet.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = { grantAccess() }) { Text("Allow access") }
+                                }
                             }
                             OutlinedTextField(
                                 value = query,
@@ -527,7 +779,8 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                         onTap = { idx -> openViewer(searchResults, idx) },
                                         onLongPress = { item ->
                                             selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
-                                        }
+                                        },
+                                        footer = if (searchResults.size >= PAGE_SIZE) "Showing the first $PAGE_SIZE matches — refine your search to see more" else null
                                     )
                                 }
                             } else if (loading) {
@@ -535,7 +788,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                     CircularProgressIndicator()
                                 }
                             } else if (openAlbum != null) {
-                                if (albumPhotos.isEmpty()) {
+                                if (albumLoading) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator()
+                                    }
+                                } else if (albumPhotos.isEmpty()) {
                                     EmptyState("This album is empty")
                                 } else {
                                     MediaGrid(
@@ -545,7 +802,11 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                         onTap = { idx -> openViewer(albumPhotos, idx) },
                                         onLongPress = { item ->
                                             selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
-                                        }
+                                        },
+                                        footer = if (albumTotal > 0) "Showing ${albumPhotos.size} of $albumTotal" else null,
+                                        onLoadMore = if (albumHasMore) {
+                                            { openAlbum?.let { loadMoreAlbum(it) } }
+                                        } else null
                                     )
                                 }
                             } else when (tab) {
@@ -581,9 +842,10 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                                     }
                                                 }
                                             }
-                                            items(albums) { album ->
+                                            items(albums, key = { it.name }) { album ->
                                                 AlbumRow(album) {
                                                     openAlbum = album.name
+                                                    selected = emptySet()
                                                     reloadAlbum(album.name)
                                                 }
                                             }
@@ -601,7 +863,9 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                             onTap = { idx -> openViewer(photos, idx) },
                                             onLongPress = { item ->
                                                 selected = if (selected.contains(item.uri.toString())) selected - item.uri.toString() else selected + item.uri.toString()
-                                            }
+                                            },
+                                            footer = if (totalPhotos > 0) "Showing ${photos.size} of $totalPhotos" else null,
+                                            onLoadMore = if (photosHasMore) { ::loadMorePhotos } else null
                                         )
                                     }
                                 }
@@ -726,16 +990,32 @@ private fun MediaGrid(
     columns: Int,
     selected: Set<String>,
     onTap: (Int) -> Unit,
-    onLongPress: (MediaItem) -> Unit
+    onLongPress: (MediaItem) -> Unit,
+    footer: String? = null,
+    onLoadMore: (() -> Unit)? = null
 ) {
+    val gridState = rememberLazyGridState()
+    // v1.7: load the next page when the user scrolls near the end.
+    val loadMoreState by rememberUpdatedState(onLoadMore)
+    LaunchedEffect(gridState, items.size) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+            .collect { lastIndex ->
+                if (lastIndex != null && lastIndex >= items.size - 12) {
+                    loadMoreState?.invoke()
+                }
+            }
+    }
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(columns),
         contentPadding = PaddingValues(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        items(items.size) { index ->
+        // v1.7: stable keys — the old index-based items lost selection
+        // highlights and flickered when the list changed under it.
+        items(items.size, key = { items[it].uri.toString() }) { index ->
             val item = items[index]
             val isSelected = selected.contains(item.uri.toString())
             Box(
@@ -763,7 +1043,11 @@ private fun MediaGrid(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(12.dp))
-                            Text(formatDuration(item.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                            // v1.7: a video with unknown duration (0) showed
+                            // a fake "0:00" — show only the play icon.
+                            if (item.durationMs > 0) {
+                                Text(formatDuration(item.durationMs), color = Color.White, style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
@@ -781,6 +1065,17 @@ private fun MediaGrid(
                         Icon(Icons.Filled.CheckCircle, "Selected", tint = Color.White, modifier = Modifier.size(32.dp))
                     }
                 }
+            }
+        }
+        if (footer != null) {
+            item(span = { GridItemSpan(columns) }) {
+                Text(
+                    footer,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(16.dp)
+                )
             }
         }
     }

@@ -19,7 +19,7 @@ import com.nova.gallery.data.ErrorLog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ErrorLogScreen(onBack: () -> Unit) {
+fun ErrorLogScreen(onBack: () -> Unit, onCleared: () -> Unit = {}) {
     val context = LocalContext.current
     var logText by remember { mutableStateOf(ErrorLog.readAll(context)) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -40,6 +40,10 @@ fun ErrorLogScreen(onBack: () -> Unit) {
                         ErrorLog.clear(context)
                         logText = ""
                         status = "Cleared"
+                        // v1.7: tell the parent so the error badge updates
+                        // immediately — it used to stay stale until the next
+                        // reload.
+                        onCleared()
                     }) { Icon(Icons.Filled.Clear, "Clear log") }
                 }
             )

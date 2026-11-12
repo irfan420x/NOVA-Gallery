@@ -6,19 +6,13 @@
 # Steps: aapt2 compile+link, javac R.java, kotlinc (embeddable) + Compose
 # plugin, d8, zipalign, apksigner.
 set -e
-# Portable paths: resolve the project root from this script's location so a
-# fresh clone builds anywhere, not only at $HOME/workspace/nova-gallery.
+# Portable paths: resolve the project root from this script's location so
+# the script works from any checkout, not just ~/workspace/nova-gallery.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-if [ -n "${NOVA_FILES_ROOT:-}" ]; then
-  FILES_ROOT="$NOVA_FILES_ROOT"
-elif [ -d "$ROOT/../nova-files" ]; then
-  FILES_ROOT="$ROOT/../nova-files"
-elif [ -d "$ROOT/../NOVA-Files" ]; then
-  FILES_ROOT="$ROOT/../NOVA-Files"
-else
-  FILES_ROOT="$HOME/workspace/nova-files"
-fi
+FILES_ROOT="${NOVA_FILES_ROOT:-$ROOT/../nova-files}"
+if [ ! -d "$FILES_ROOT" ]; then FILES_ROOT="$ROOT/../NOVA-Files"; fi
+if [ ! -d "$FILES_ROOT" ]; then FILES_ROOT="$HOME/workspace/nova-files"; fi
 export JAVA_HOME="${JAVA_HOME:-$FILES_ROOT/tools/jdk-17.0.21+9}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
 export PATH="$JAVA_HOME/bin:$PATH"
@@ -56,7 +50,7 @@ echo "== 2. aapt2 link =="
 LINK_ARGS=(-I "$ANDROID_JAR" --manifest "$SRC/AndroidManifest.xml"
     --auto-add-overlay --java "$BUILD/gen"
     --min-sdk-version 29 --target-sdk-version 35
-    --version-code 7 --version-name 1.6
+    --version-code 8 --version-name 1.7
     -o "$BUILD/apk/app-unsigned.apk")
 while read -r pkg resdir; do
     LINK_ARGS+=(--extra-packages "$pkg")

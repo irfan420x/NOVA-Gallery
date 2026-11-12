@@ -50,7 +50,7 @@ echo "== 2. aapt2 link =="
 LINK_ARGS=(-I "$ANDROID_JAR" --manifest "$SRC/AndroidManifest.xml"
     --auto-add-overlay --java "$BUILD/gen"
     --min-sdk-version 29 --target-sdk-version 35
-    --version-code 8 --version-name 1.7
+    --version-code 9 --version-name 1.8
     -o "$BUILD/apk/app-unsigned.apk")
 while read -r pkg resdir; do
     LINK_ARGS+=(--extra-packages "$pkg")

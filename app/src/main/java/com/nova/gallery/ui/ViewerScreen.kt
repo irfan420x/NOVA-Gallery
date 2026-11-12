@@ -137,9 +137,12 @@ fun ViewerScreen(
                                 isFavorite = com.nova.gallery.data.FavoriteStore.toggle(context, currentItem)
                                 showStatus(if (isFavorite) "Added to favorites" else "Removed from favorites")
                             }) {
+                                // v1.8 Nebula: a starred photo shows a pink
+                                // (tertiary) star; unstarred stays neutral.
                                 Icon(
                                     if (isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
-                                    if (isFavorite) "Remove from favorites" else "Add to favorites"
+                                    if (isFavorite) "Remove from favorites" else "Add to favorites",
+                                    tint = if (isFavorite) NovaPink else MaterialTheme.colorScheme.onSurface
                                 )
                             }
                             IconButton(onClick = {

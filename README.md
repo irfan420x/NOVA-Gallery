@@ -50,6 +50,16 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.8** — Nebula Dark Premium style pass (style only, no behavior
+  changes): dark-first space theme — deep navy-black background
+  (#0A0C1C), #14172B surfaces with 1dp outline borders, violet #8B5CF6
+  primary with a #7C3AED → #3B82F6 gradient on primary buttons and the
+  empty-state icon; album cards are 20dp with outline borders; the
+  selected tab gets a violet pill; the search field is a 20dp surface
+  card with a violet focus ring; favorites now show a pink star; the
+  light theme is kept, restyled with soft #F4F5FB surfaces and white
+  cards. Photos stay the hero — the theme frames them, it never tints
+  them.
 - **v1.7** — Final audit: real pagination — the Photos tab and album view
   load in pages of 500 with exact totals ("Showing X of Y"), so no photo
   is hidden behind the old 10,000 cap; album counts are exact

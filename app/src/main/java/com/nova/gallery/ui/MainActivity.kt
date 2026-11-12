@@ -14,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -697,27 +698,40 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                         },
                         bottomBar = {
                             if (openAlbum == null && !selectionMode) {
+                                // v1.8 Nebula: selected tab gets a violet
+                                // pill; unselected tabs are muted lavender.
+                                val navColors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = NovaAccent,
+                                    selectedTextColor = NovaAccent,
+                                    unselectedIconColor = NovaMuted,
+                                    unselectedTextColor = NovaMuted,
+                                    indicatorColor = NovaAccent.copy(alpha = 0.18f)
+                                )
                                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.ALBUMS,
+                                        colors = navColors,
                                         onClick = { tab = GalleryTab.ALBUMS; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.PhotoLibrary, null) },
                                         label = { Text("Albums") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.PHOTOS,
+                                        colors = navColors,
                                         onClick = { tab = GalleryTab.PHOTOS; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Photo, null) },
                                         label = { Text("Photos") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.FAVORITES,
+                                        colors = navColors,
                                         onClick = { tab = GalleryTab.FAVORITES; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Star, null) },
                                         label = { Text("Favorites") }
                                     )
                                     NavigationBarItem(
                                         selected = tab == GalleryTab.TRASH,
+                                        colors = navColors,
                                         onClick = { tab = GalleryTab.TRASH; selected = emptySet() },
                                         icon = { Icon(Icons.Filled.Delete, null) },
                                         label = { Text("Trash") }
@@ -762,6 +776,18 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
                                     { IconButton(onClick = { query = ""; searchResults = emptyList() }) { Icon(Icons.Filled.Clear, "Clear search") } }
                                 } else null,
                                 singleLine = true,
+                                // v1.8 Nebula: search sits on a surface card
+                                // with a violet focus ring and a muted
+                                // unfocused border (the scheme outline is a
+                                // hairline 8% white — too faint for a field).
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                                    focusedBorderColor = NovaAccent,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                    cursorColor = NovaAccent
+                                ),
+                                shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                             if (query.isNotBlank()) {
@@ -945,16 +971,30 @@ fun NovaGalleryApp(viewUri: android.net.Uri? = null) {
 
 @Composable
 private fun EmptyState(text: String) {
+    // v1.8 Nebula: centered icon in a gradient-tinted circle + muted message.
     Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier.size(72.dp)
+                    .background(NovaGradientBrush, androidx.compose.foundation.shape.CircleShape),
+                contentAlignment = Alignment.Center
+            ) { Icon(Icons.Filled.PhotoLibrary, null, tint = Color.White, modifier = Modifier.size(32.dp)) }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 
 @Composable
 private fun AlbumRow(album: Album, onClick: () -> Unit) {
+    // v1.8 Nebula: cards are 20dp with a 1dp surface-outline border.
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, NovaOutline, RoundedCornerShape(20.dp))
             .clickable(onClick = onClick).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1052,8 +1092,9 @@ private fun MediaGrid(
                     }
                 }
                 if (item.isFavorite) {
+                    // v1.8 Nebula: favorites are pink (tertiary), sparingly.
                     Icon(
-                        Icons.Filled.Star, null, tint = Color(0xFFFFC107),
+                        Icons.Filled.Star, null, tint = NovaPink,
                         modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(18.dp)
                     )
                 }
@@ -1098,8 +1139,18 @@ private fun PermissionScreen(onGrant: () -> Unit, onSkip: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onGrant, Modifier.fillMaxWidth()) { Text("Allow access") }
+        // v1.8 Nebula: primary buttons use the violet→blue gradient.
+        Button(
+            onClick = onGrant,
+            modifier = Modifier.fillMaxWidth().background(NovaGradientBrush, RoundedCornerShape(14.dp)),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+            shape = RoundedCornerShape(14.dp)
+        ) { Text("Allow access") }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onSkip, Modifier.fillMaxWidth()) { Text("Continue without it") }
+        OutlinedButton(
+            onClick = onSkip,
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp)
+        ) { Text("Continue without it") }
     }
 }
